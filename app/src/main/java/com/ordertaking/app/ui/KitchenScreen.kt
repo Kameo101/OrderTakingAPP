@@ -74,6 +74,7 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
     val error by hub.serverError.collectAsStateWithLifecycle()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var showSettings by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
     var ips by remember { mutableStateOf(localIpAddresses()) }
 
     LaunchedEffect(Unit) {
@@ -88,6 +89,11 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
 
     val active = tickets.filter { it.status != TicketStatus.DONE }.sortedBy { it.receivedAtMillis }
     val hasDone = tickets.any { it.status == TicketStatus.DONE }
+
+    if (showHistory) {
+        HistoryScreen(dark = true, scopeNote = "Every order received by this kitchen", onBack = { showHistory = false })
+        return
+    }
 
     AppTheme(dark = true) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -115,6 +121,8 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                         fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Color.White,
                         modifier = Modifier.padding(horizontal = 16.dp),
                     )
+                    OutlinedButton(onClick = { showHistory = true }) { Text("📊 Sales", color = Color.White) }
+                    Spacer(Modifier.width(8.dp))
                     OutlinedButton(onClick = { hub.recallLast() }, enabled = hasDone) { Text("↶ Recall last") }
                     IconButton(onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, "Settings", tint = Color.White)
@@ -160,6 +168,12 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                         ips.forEach { Text("$it   (port $KITCHEN_PORT)", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
                         if (ips.isEmpty()) Text("This tablet isn't connected to Wi-Fi.", color = LateRed)
                         Spacer(Modifier.height(8.dp))
+                        var currency by remember { mutableStateOf(app.prefs.currencySymbol) }
+                        androidx.compose.material3.OutlinedTextField(
+                            value = currency,
+                            onValueChange = { currency = it.take(4); app.prefs.currencySymbol = currency.ifBlank { "$" } },
+                            label = { Text("Currency for sales reports") }, singleLine = true,
+                        )
                         OutlinedButton(onClick = { app.chime() }) { Text("Test sound") }
                         OutlinedButton(onClick = { confirmClear = true }) { Text("Clear all tickets…") }
                         OutlinedButton(onClick = onSwitchMode) { Text("Change what this tablet is used for…") }

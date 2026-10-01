@@ -5,7 +5,18 @@ Android app for counter ordering with a kitchen display. One APK, two modes:
 - **Cashier** — visual menu grid, tap to add to the order tray, pick options (cook temperature, extras), add notes, enter a table number or customer name, then **Send to Kitchen**.
 - **Kitchen display** — incoming orders appear instantly as tickets (oldest on the left) with a timer, a sound alert, **START** (turns the ticket amber) and **DONE** (removes it and tells the cashier the order is ready). **Recall last** brings back a ticket bumped by mistake.
 
+- **📊 Sales** (on both screens) — order history and a sales report for Today / Yesterday / Last 7 days / Last 30 days / All time: number of orders, items sold, sales total, average order, best sellers (how many of each item sold and for how much), most-picked options, a day-by-day table, and every order with its items. **Export to spreadsheet** saves a CSV you can open in Excel or Google Sheets.
+
 There is no payment step, no cloud service and no account to create.
+
+## Order history storage
+
+Every order is written to `order_history.jsonl` in the app's private storage the moment it is received, and synced to disk, so closing the app, restarting the tablet or a power cut doesn't lose it. History is never trimmed automatically.
+
+- The **kitchen tablet** keeps every order from every cashier — use it for the full sales picture.
+- Each **cashier tablet** keeps the orders it took (recorded once the kitchen confirms them).
+
+The history is only deleted if the app is uninstalled or its data is cleared in Android settings, so export to a spreadsheet regularly as a backup.
 
 ## How it connects
 
@@ -21,7 +32,7 @@ Order payload (`SUBMIT_ORDER` message):
   "timestamp": "2026-10-01T08:40:00Z",
   "origin": "Table 4",
   "items": [
-    { "item_id": "101", "name": "Classic Cheeseburger", "quantity": 2, "modifiers": ["Medium rare"], "notes": "No onions" }
+    { "item_id": "101", "name": "Classic Cheeseburger", "quantity": 2, "modifiers": ["Medium rare"], "notes": "No onions", "price": 12.50 }
   ],
   "status": "pending",
   "taken_by": "Sam"

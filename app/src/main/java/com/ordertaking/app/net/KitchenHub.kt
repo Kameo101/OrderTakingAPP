@@ -5,6 +5,8 @@ import android.util.Log
 import com.ordertaking.app.data.Ack
 import com.ordertaking.app.data.AppJson
 import com.ordertaking.app.data.AppPrefs
+import com.ordertaking.app.data.HistoryEntry
+import com.ordertaking.app.data.OrderHistory
 import com.ordertaking.app.data.JsonFileStore
 import com.ordertaking.app.data.KitchenTicket
 import com.ordertaking.app.data.Order
@@ -31,7 +33,7 @@ import java.util.Collections
  * keeps the ticket list (persisted, so a restart doesn't lose orders) and pushes
  * "ready" notices back to the cashiers when a ticket is bumped.
  */
-class KitchenHub(context: Context, private val prefs: AppPrefs) {
+class KitchenHub(context: Context, private val prefs: AppPrefs, private val history: OrderHistory) {
     private val store = JsonFileStore(
         File(context.filesDir, "kitchen_tickets.json"),
         ListSerializer(KitchenTicket.serializer()),
@@ -99,6 +101,9 @@ class KitchenHub(context: Context, private val prefs: AppPrefs) {
         synchronized(this) {
             _tickets.value.find { it.order.orderId == order.orderId }?.let { return it } // duplicate re-send
             val ticket = KitchenTicket(order, prefs.nextTicketNumber(), System.currentTimeMillis())
+            // Record permanently before acknowledging, so an acknowledged order is never missing from the history.
+            runCatching { history.append(HistoryEntry(order, ticket.receivedAtMillis, ticket.ticketNumber)) }
+                .onFailure { Log.e("KitchenHub", "Could not save order to history", it) }
             update { it + ticket }
             _newTickets.tryEmit(ticket)
             return ticket

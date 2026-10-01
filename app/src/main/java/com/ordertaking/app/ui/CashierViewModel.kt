@@ -72,6 +72,7 @@ class CashierViewModel : ViewModel() {
                     quantity = l.quantity,
                     modifiers = l.modifiers.map { it.name },
                     notes = l.notes,
+                    price = l.unitPrice,
                 )
             },
         )

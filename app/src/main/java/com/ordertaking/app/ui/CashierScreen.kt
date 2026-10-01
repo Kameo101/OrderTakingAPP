@@ -94,17 +94,22 @@ fun CashierScreen(onSwitchMode: () -> Unit, vm: CashierViewModel = viewModel()) 
     LaunchedEffect(Unit) { app.cashierLink.start() }
 
     var showSettings by remember { mutableStateOf(false) }
+    var showHistory by remember { mutableStateOf(false) }
     AppTheme {
-        if (showSettings) {
-            CashierSettingsScreen(onBack = { showSettings = false }, onSwitchMode = onSwitchMode)
-        } else {
-            CashierMain(vm) { showSettings = true }
+        when {
+            showHistory -> HistoryScreen(
+                dark = false,
+                scopeNote = "Orders taken on this tablet (the kitchen tablet has every order)",
+                onBack = { showHistory = false },
+            )
+            showSettings -> CashierSettingsScreen(onBack = { showSettings = false }, onSwitchMode = onSwitchMode)
+            else -> CashierMain(vm, onSettings = { showSettings = true }, onHistory = { showHistory = true })
         }
     }
 }
 
 @Composable
-private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit) {
+private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory: () -> Unit) {
     val app = App.instance
     run {
         val menu by vm.menu.collectAsStateWithLifecycle()
@@ -138,7 +143,7 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(Modifier.safeDrawingPadding()) {
                 Column(Modifier.fillMaxSize()) {
-                    CashierTopBar(linkState, outbox.size, onSettings)
+                    CashierTopBar(linkState, outbox.size, onSettings, onHistory)
                     BoxWithConstraints(Modifier.fillMaxSize()) {
                         val cartCounts = cart.groupBy { it.item.id }.mapValues { e -> e.value.sumOf { it.quantity } }
                         val onItemTap: (MenuItem) -> Unit = { item ->
@@ -220,7 +225,7 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit) {
 }
 
 @Composable
-private fun CashierTopBar(state: LinkState, queued: Int, onSettings: () -> Unit) {
+private fun CashierTopBar(state: LinkState, queued: Int, onSettings: () -> Unit, onHistory: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.primary, contentColor = Color.White) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -240,6 +245,9 @@ private fun CashierTopBar(state: LinkState, queued: Int, onSettings: () -> Unit)
                     Text(label)
                     if (queued > 0) Text("  ·  $queued waiting to send", fontWeight = FontWeight.Bold)
                 }
+            }
+            TextButton(onClick = onHistory, modifier = Modifier.padding(start = 8.dp)) {
+                Text("📊 Sales", color = Color.White, fontSize = 17.sp)
             }
             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
         }

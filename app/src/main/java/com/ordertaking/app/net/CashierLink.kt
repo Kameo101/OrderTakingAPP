@@ -5,6 +5,8 @@ import android.util.Log
 import com.ordertaking.app.data.Ack
 import com.ordertaking.app.data.AppJson
 import com.ordertaking.app.data.AppPrefs
+import com.ordertaking.app.data.HistoryEntry
+import com.ordertaking.app.data.OrderHistory
 import com.ordertaking.app.data.JsonFileStore
 import com.ordertaking.app.data.Order
 import com.ordertaking.app.data.OrderStatusUpdate
@@ -44,7 +46,7 @@ sealed class LinkState {
  * acknowledges it, so an order taken while the Wi-Fi blips is sent automatically
  * when the connection comes back.
  */
-class CashierLink(context: Context, private val prefs: AppPrefs) {
+class CashierLink(context: Context, private val prefs: AppPrefs, private val history: OrderHistory) {
     private val outboxStore = JsonFileStore(
         File(context.filesDir, "outbox.json"),
         ListSerializer(Order.serializer()),
@@ -155,12 +157,14 @@ class CashierLink(context: Context, private val prefs: AppPrefs) {
 
     private fun onAck(ack: Ack) {
         synchronized(this) {
+            val order = _outbox.value.find { it.orderId == ack.orderId } ?: return
+            // This tablet's own record of orders it took, kept once the kitchen has confirmed them.
+            runCatching { history.append(HistoryEntry(order, System.currentTimeMillis(), ack.ticketNumber)) }
+                .onFailure { Log.e("CashierLink", "Could not save order to history", it) }
             val next = _outbox.value.filterNot { it.orderId == ack.orderId }
-            if (next.size != _outbox.value.size) {
-                _outbox.value = next
-                outboxStore.save(next)
-                _acks.tryEmit(ack)
-            }
+            _outbox.value = next
+            outboxStore.save(next)
+            _acks.tryEmit(ack)
         }
     }
 

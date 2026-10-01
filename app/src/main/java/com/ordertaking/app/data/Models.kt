@@ -56,6 +56,8 @@ data class OrderItem(
     val quantity: Int,
     val modifiers: List<String> = emptyList(),
     val notes: String = "",
+    /** Unit price including options, for sales reports. Not part of the original spec; 0 if unknown. */
+    val price: Double = 0.0,
 )
 
 @Serializable

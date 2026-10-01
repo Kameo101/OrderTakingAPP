@@ -4,6 +4,7 @@ import android.app.Application
 import android.media.RingtoneManager
 import com.ordertaking.app.data.AppPrefs
 import com.ordertaking.app.data.MenuRepository
+import com.ordertaking.app.data.OrderHistory
 import com.ordertaking.app.net.CashierLink
 import com.ordertaking.app.net.KitchenHub
 
@@ -12,8 +13,9 @@ class App : Application() {
     lateinit var prefs: AppPrefs
         private set
     val menu by lazy { MenuRepository(this) }
-    val cashierLink by lazy { CashierLink(this, prefs) }
-    val kitchenHub by lazy { KitchenHub(this, prefs) }
+    val history by lazy { OrderHistory(java.io.File(filesDir, "order_history.jsonl")) }
+    val cashierLink by lazy { CashierLink(this, prefs, history) }
+    val kitchenHub by lazy { KitchenHub(this, prefs, history) }
 
     override fun onCreate() {
         super.onCreate()
