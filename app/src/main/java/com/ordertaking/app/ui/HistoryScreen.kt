@@ -58,6 +58,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ordertaking.app.App
@@ -340,7 +341,9 @@ private fun OrderRow(e: HistoryEntry, currency: String, onLongPress: () -> Unit)
                     Text(
                         (if (e.ticketNumber > 0) "#${e.ticketNumber} · " else "") + e.order.origin,
                         fontWeight = FontWeight.Bold, fontSize = 17.sp,
+                        textDecoration = if (e.cancelled) TextDecoration.LineThrough else null,
                     )
+                    if (e.cancelled) Text("CANCELLED — not counted in sales", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = LateRed)
                     Text(
                         SimpleDateFormat("EEE d MMM, HH:mm", Locale.getDefault()).format(Date(e.recordedAtMillis)) +
                             (if (e.order.takenBy.isNotBlank()) " · by ${e.order.takenBy}" else "") +
@@ -348,7 +351,10 @@ private fun OrderRow(e: HistoryEntry, currency: String, onLongPress: () -> Unit)
                         fontSize = 13.sp,
                     )
                 }
-                Text(money(total, currency), fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                Text(
+                    money(total, currency), fontWeight = FontWeight.Bold, fontSize = 17.sp,
+                    textDecoration = if (e.cancelled) TextDecoration.LineThrough else null,
+                )
                 Text(if (open) "  ▲" else "  ▼", fontSize = 13.sp)
             }
             if (open) {

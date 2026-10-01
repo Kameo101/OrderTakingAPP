@@ -40,6 +40,26 @@ class HistoryTest {
     }
 
     @Test
+    fun cancelledOrdersAreKeptButNotCounted() {
+        val f = File.createTempFile("history", ".jsonl").apply { deleteOnExit() }
+        val h = OrderHistory(f)
+        h.append(entry("A", "2026-10-01", burger))
+        h.append(entry("B", "2026-10-01", fries))
+
+        assertTrue(h.markCancelled("A"))
+        assertFalse(h.markCancelled("A")) // already cancelled
+        assertFalse(h.markCancelled("nope"))
+
+        val loaded = OrderHistory(f).loadAll()
+        assertEquals(listOf("A", "B"), loaded.map { it.order.orderId })
+        assertTrue(loaded[0].cancelled)
+        val s = Sales.summarize(loaded, utc)
+        assertEquals(1, s.orders)
+        assertEquals(6.0, s.revenue, 0.001)
+        assertFalse(Sales.toCsv(loaded, utc).contains(",A,"))
+    }
+
+    @Test
     fun deleteRemovesOnlyThatOrderAndSurvivesReload() {
         val f = File.createTempFile("history", ".jsonl").apply { deleteOnExit() }
         val h = OrderHistory(f)

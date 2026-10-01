@@ -2,6 +2,7 @@ package com.ordertaking.app
 
 import com.ordertaking.app.data.Ack
 import com.ordertaking.app.data.AppJson
+import com.ordertaking.app.data.CancelOrder
 import com.ordertaking.app.data.MenuRepository
 import com.ordertaking.app.data.ModifierOption
 import com.ordertaking.app.data.Order
@@ -78,6 +79,20 @@ class PayloadTest {
         val json = AppJson.parseToJsonElement(AppJson.encodeToString(WireMessage.serializer(), messages[2])).jsonObject
         assertEquals("SET_STATUS", json["type"]!!.jsonPrimitive.content)
         assertEquals("SERVED", json["status"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun cancelAndChangedOrdersRoundTrip() {
+        val cancel: WireMessage = CancelOrder("ORD-1")
+        val text = AppJson.encodeToString(WireMessage.serializer(), cancel)
+        assertEquals("CANCEL_ORDER", AppJson.parseToJsonElement(text).jsonObject["type"]!!.jsonPrimitive.content)
+        assertEquals(cancel, AppJson.decodeFromString(WireMessage.serializer(), text))
+
+        val changed: WireMessage = SubmitOrder(order.copy(orderId = "ORD-2", replaces = "ORD-1"))
+        assertEquals(changed, AppJson.decodeFromString(WireMessage.serializer(), AppJson.encodeToString(WireMessage.serializer(), changed)))
+
+        val cancelled: WireMessage = OrderStatusUpdate("ORD-1", 12, "Maria", TicketStatus.CANCELLED)
+        assertEquals(cancelled, AppJson.decodeFromString(WireMessage.serializer(), AppJson.encodeToString(WireMessage.serializer(), cancelled)))
     }
 
     @Test

@@ -6,6 +6,7 @@ import android.util.Log
 import com.ordertaking.app.data.Ack
 import com.ordertaking.app.data.AppJson
 import com.ordertaking.app.data.AppPrefs
+import com.ordertaking.app.data.CancelOrder
 import com.ordertaking.app.data.HistoryEntry
 import com.ordertaking.app.data.OrderHistory
 import com.ordertaking.app.data.JsonFileStore
@@ -30,6 +31,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
 import java.io.File
@@ -97,6 +99,13 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
     private val _readyArrivals = MutableSharedFlow<OrderStatusUpdate>(extraBufferCapacity = 32)
     val readyArrivals: SharedFlow<OrderStatusUpdate> = _readyArrivals.asSharedFlow()
 
+    /** Orders called off on this tablet that the kitchen hasn't confirmed yet. Saved; re-sent until confirmed. */
+    private val cancelStore = JsonFileStore(
+        File(context.filesDir, "cancels.json"),
+        ListSerializer(String.serializer()),
+    ) { emptyList() }
+    private val cancelPending = java.util.concurrent.ConcurrentHashMap.newKeySet<String>().apply { addAll(cancelStore.load()) }
+
     /** Handed out on this tablet but not yet confirmed by the kitchen; re-sent on reconnect. */
     private val servedPending = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
@@ -131,7 +140,7 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
                 val c = client
                 if (c == null || !c.isUp) {
                     connectOnce()
-                } else if ((_outbox.value.isNotEmpty() || servedPending.isNotEmpty()) && System.currentTimeMillis() - lastFlush > 5_000) {
+                } else if ((_outbox.value.isNotEmpty() || servedPending.isNotEmpty() || cancelPending.isNotEmpty()) && System.currentTimeMillis() - lastFlush > 5_000) {
                     flush(c) // No ack yet: resend. The kitchen ignores duplicates.
                 }
                 delay(2_000)
@@ -159,13 +168,41 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
         }
     }
 
+    /** Queues an order. A changed order ([Order.replaces] set) takes the place of the original. */
     fun submit(order: Order) {
         synchronized(this) {
-            val next = _outbox.value + order
+            if (order.replaces.isNotBlank()) {
+                // The kitchen cancels the original when the new one arrives; here it's just taken off the record.
+                markCancelledLocally(order.replaces)
+            }
+            val next = _outbox.value.filterNot { it.orderId == order.replaces } + order
             _outbox.value = next
             outboxStore.save(next)
         }
         client?.takeIf { it.isUp }?.let { c -> scope.launch { flush(c) } }
+    }
+
+    /** Calls an order off: it's crossed out on the kitchen screen and left out of sales. */
+    fun cancel(orderId: String) {
+        synchronized(this) {
+            markCancelledLocally(orderId)
+            val next = _outbox.value.filterNot { it.orderId == orderId }
+            if (next.size != _outbox.value.size) {
+                _outbox.value = next
+                outboxStore.save(next)
+            }
+            // Sent even if it never left the outbox, in case it reached the kitchen just before.
+            cancelPending.add(orderId)
+            cancelStore.save(cancelPending.toList())
+        }
+        setReady(_ready.value.filterNot { it.orderId == orderId })
+        val c = client?.takeIf { it.isUp } ?: return
+        scope.launch(sendQueue) { runCatching { c.sendText(AppJson.encodeToString(WireMessage.serializer(), CancelOrder(orderId))) } }
+    }
+
+    private fun markCancelledLocally(orderId: String) {
+        runCatching { history.markCancelled(orderId) }
+            .onFailure { Log.e("CashierLink", "Could not mark order cancelled in history", it) }
     }
 
     /** The order was handed to the customer: clear it here and on every other tablet. */
@@ -192,7 +229,11 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
     private fun onStatus(u: OrderStatusUpdate) = synchronized(_ready) {
         val others = _ready.value.filterNot { it.orderId == u.orderId }
         when (u.status) {
-            TicketStatus.DONE -> if (u.orderId !in servedPending) {
+            TicketStatus.CANCELLED -> {
+                if (cancelPending.remove(u.orderId)) cancelStore.save(cancelPending.toList())
+                setReady(others)
+            }
+            TicketStatus.DONE -> if (u.orderId !in servedPending && u.orderId !in cancelPending) {
                 val isNew = others.size == _ready.value.size
                 setReady(others + u)
                 if (isNew) _readyArrivals.tryEmit(u)
@@ -207,7 +248,7 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
 
     private fun onReadyList(list: ReadyList) = synchronized(_ready) {
         val known = _ready.value.map { it.orderId }.toSet()
-        val next = list.orders.filter { it.orderId !in servedPending }
+        val next = list.orders.filter { it.orderId !in servedPending && it.orderId !in cancelPending }
         setReady(next)
         next.lastOrNull { it.orderId !in known }?.let { _readyArrivals.tryEmit(it) }
     }
@@ -327,6 +368,9 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
 
     private fun flush(c: KitchenConn) {
         lastFlush = System.currentTimeMillis()
+        for (id in cancelPending) {
+            runCatching { c.sendText(AppJson.encodeToString(WireMessage.serializer(), CancelOrder(id))) }
+        }
         for (id in servedPending) {
             runCatching { c.sendText(AppJson.encodeToString(WireMessage.serializer(), SetStatus(id, TicketStatus.SERVED))) }
         }

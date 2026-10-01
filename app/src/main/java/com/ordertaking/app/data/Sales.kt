@@ -54,7 +54,9 @@ object Sales {
         return entries.filter { val d = dateOf(it, zone); !d.isBefore(from) && !d.isAfter(to) }
     }
 
-    fun summarize(entries: List<HistoryEntry>, zone: ZoneId = ZoneId.systemDefault()): SalesSummary {
+    /** Cancelled orders are listed in the history but never counted. */
+    fun summarize(all: List<HistoryEntry>, zone: ZoneId = ZoneId.systemDefault()): SalesSummary {
+        val entries = all.filterNot { it.cancelled }
         val lines = entries.flatMap { it.order.items }
         val byItem = lines.groupBy { it.name }
             .map { (name, ls) -> ItemSales(name, ls.sumOf { it.quantity }, ls.sumOf { it.price * it.quantity }) }
@@ -79,12 +81,12 @@ object Sales {
         )
     }
 
-    /** One row per item line; opens in Excel / Google Sheets. */
+    /** One row per item line; opens in Excel / Google Sheets. Cancelled orders are left out. */
     fun toCsv(entries: List<HistoryEntry>, zone: ZoneId = ZoneId.systemDefault()): String {
         val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(zone)
         fun esc(s: String) = if (s.any { it == ',' || it == '"' || it == '\n' }) "\"" + s.replace("\"", "\"\"") + "\"" else s
         val sb = StringBuilder("date_time,order_id,ticket,for,taken_by,item,quantity,unit_price,line_total,options,notes\n")
-        for (e in entries) {
+        for (e in entries.filterNot { it.cancelled }) {
             for (i in e.order.items) {
                 sb.append(
                     listOf(

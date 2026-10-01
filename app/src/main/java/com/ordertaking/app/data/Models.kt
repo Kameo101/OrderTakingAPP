@@ -68,6 +68,8 @@ data class Order(
     val items: List<OrderItem>,
     val status: String = "pending",
     @SerialName("taken_by") val takenBy: String = "",
+    /** Set when this order is a corrected copy of an earlier one; the kitchen cancels that one. */
+    val replaces: String = "",
 )
 
 // ---------------------------------------------------------------------------
@@ -82,6 +84,8 @@ enum class TicketStatus {
     DONE,
     /** Handed to the customer by a cashier. */
     SERVED,
+    /** Called off by a cashier (or replaced by a changed order). */
+    CANCELLED,
 }
 
 @Serializable
@@ -92,6 +96,12 @@ data class KitchenTicket(
     val receivedAtMillis: Long,
     val status: TicketStatus = TicketStatus.PENDING,
     val bumpedAtMillis: Long? = null,
+    /** Cancelled while it was on the kitchen screen: shown crossed out until the kitchen taps OK. */
+    val showCancelled: Boolean = false,
+    /** Ticket number of the changed order that replaced this one, if any. */
+    val replacedBy: Int = 0,
+    /** Ticket number of the order this one replaces, if any. */
+    val replacesTicket: Int = 0,
 )
 
 // ---------------------------------------------------------------------------
@@ -132,6 +142,11 @@ data class OrderStatusUpdate(
 @Serializable
 @SerialName("READY_LIST")
 data class ReadyList(val orders: List<OrderStatusUpdate>) : WireMessage()
+
+/** Cashier -> kitchen: call off an order. Re-sent until the kitchen answers with a CANCELLED status. */
+@Serializable
+@SerialName("CANCEL_ORDER")
+data class CancelOrder(@SerialName("order_id") val orderId: String) : WireMessage()
 
 /** Cashier -> kitchen: an order was handed out (SERVED), or that was undone (DONE). */
 @Serializable

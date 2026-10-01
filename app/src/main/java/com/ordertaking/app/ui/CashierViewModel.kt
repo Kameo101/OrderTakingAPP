@@ -24,6 +24,9 @@ data class CartLine(
     val total: Double get() = unitPrice * quantity
 }
 
+/** A sent order being corrected: the tray holds its items, and sending replaces it. */
+data class ChangingOrder(val orderId: String, val ticketNumber: Int, val origin: String)
+
 class CashierViewModel : ViewModel() {
     private val app = App.instance
     val menu = app.menu.items
@@ -31,6 +34,23 @@ class CashierViewModel : ViewModel() {
 
     private val _cart = MutableStateFlow<List<CartLine>>(emptyList())
     val cart: StateFlow<List<CartLine>> = _cart.asStateFlow()
+
+    private val _changing = MutableStateFlow<ChangingOrder?>(null)
+    val changing: StateFlow<ChangingOrder?> = _changing.asStateFlow()
+
+    /** Puts a sent order back in the tray to correct it. The original stays with the kitchen until the new one is sent. */
+    fun startChange(order: Order, ticketNumber: Int) {
+        val menu = app.menu.items.value
+        _cart.value = order.items.map { oi ->
+            // Use today's menu entry if it's still there; otherwise rebuild one from the order at the price paid.
+            val item = menu.find { it.id == oi.itemId }
+                ?: MenuItem(id = oi.itemId, name = oi.name, price = oi.price)
+            val options = item.modifierGroups.flatMap { it.options }
+            val mods = oi.modifiers.map { name -> options.find { it.name == name } ?: ModifierOption(name) }
+            CartLine(UUID.randomUUID().toString(), item, oi.quantity, mods, oi.notes)
+        }
+        _changing.value = ChangingOrder(order.orderId, ticketNumber, order.origin)
+    }
 
     /** Adds to the tray. An identical line (same item, options and note) just gets its quantity bumped. */
     fun add(item: MenuItem, modifiers: List<ModifierOption> = emptyList(), quantity: Int = 1, notes: String = "") {
@@ -52,8 +72,10 @@ class CashierViewModel : ViewModel() {
         _cart.value = _cart.value.map { if (it.key == key) it.copy(notes = notes.trim()) else it }
     }
 
+    /** Empties the tray. While changing an order, this abandons the change and leaves the original as it was. */
     fun clear() {
         _cart.value = emptyList()
+        _changing.value = null
     }
 
     /** Builds the order payload, hands it to the outbox and empties the tray. */
@@ -65,6 +87,7 @@ class CashierViewModel : ViewModel() {
             timestamp = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString(),
             origin = origin,
             takenBy = app.prefs.staffName,
+            replaces = _changing.value?.orderId ?: "",
             items = lines.map { l ->
                 OrderItem(
                     itemId = l.item.id,

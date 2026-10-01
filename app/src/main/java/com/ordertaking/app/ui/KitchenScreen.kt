@@ -50,6 +50,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -96,8 +97,12 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
         }
     }
 
-    val active = tickets.filter { it.status == TicketStatus.PENDING || it.status == TicketStatus.IN_PROGRESS }
-        .sortedBy { it.receivedAtMillis }
+    // Open tickets, plus cancelled ones the kitchen hasn't acknowledged yet (shown crossed out).
+    val active = tickets.filter {
+        it.status == TicketStatus.PENDING || it.status == TicketStatus.IN_PROGRESS ||
+            (it.status == TicketStatus.CANCELLED && it.showCancelled)
+    }.sortedBy { it.receivedAtMillis }
+    val openCount = active.count { it.status != TicketStatus.CANCELLED }
     val hasDone = tickets.any { it.status == TicketStatus.DONE || it.status == TicketStatus.SERVED }
 
     if (showHistory) {
@@ -114,7 +119,7 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("Kitchen · ${active.size} open", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        Text("Kitchen · $openCount open", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         Text(
                             if (error != null) "⚠ Not receiving orders: $error"
                             else "Address: ${ips.firstOrNull() ?: "no Wi-Fi"}  ·  $tablets cashier tablet(s) connected" +
@@ -165,6 +170,7 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                                 onStart = { hub.setStatus(t.order.orderId, TicketStatus.IN_PROGRESS) },
                                 onUndoStart = { hub.setStatus(t.order.orderId, TicketStatus.PENDING) },
                                 onBump = { hub.bump(t.order.orderId) },
+                                onDismissCancelled = { hub.dismissCancelled(t.order.orderId) },
                                 modifier = Modifier.width(300.dp).fillMaxHeight(),
                             )
                         }
@@ -280,8 +286,10 @@ private fun TicketCard(
     onStart: () -> Unit,
     onUndoStart: () -> Unit,
     onBump: () -> Unit,
+    onDismissCancelled: () -> Unit,
     modifier: Modifier,
 ) {
+    if (t.status == TicketStatus.CANCELLED) return CancelledTicketCard(t, onDismissCancelled, modifier)
     val cooking = t.status == TicketStatus.IN_PROGRESS
     val elapsedSec = ((now - t.receivedAtMillis) / 1000).coerceAtLeast(0)
     val minutes = elapsedSec / 60
@@ -311,6 +319,14 @@ private fun TicketCard(
                     )
                 }
                 Text(t.order.origin, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                if (t.replacesTicket > 0) {
+                    Text(
+                        "✏ CHANGED ORDER — replaces #${t.replacesTicket}",
+                        fontSize = 15.sp, fontWeight = FontWeight.Black, color = Color.Black,
+                        modifier = Modifier.padding(vertical = 2.dp).background(Color(0xFFFFD740), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    )
+                }
                 Text(
                     buildString {
                         append(SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(t.receivedAtMillis)))
@@ -363,6 +379,51 @@ private fun TicketCard(
                     modifier = Modifier.weight(1f).height(64.dp),
                 ) { Text("DONE ✓", fontSize = 18.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center) }
             }
+        }
+    }
+}
+
+/** A ticket a cashier called off: crossed out, stays put until the kitchen taps OK. */
+@Composable
+private fun CancelledTicketCard(t: KitchenTicket, onDismiss: () -> Unit, modifier: Modifier) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF2B1B1B), contentColor = Color(0xFFB0BEC5)),
+        border = BorderStroke(3.dp, LateRed),
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            Column(Modifier.fillMaxWidth().background(LateRed).padding(12.dp)) {
+                Text(
+                    if (t.replacedBy > 0) "CHANGED" else "CANCELLED",
+                    fontSize = 26.sp, fontWeight = FontWeight.Black, color = Color.White,
+                )
+                Text(
+                    "#${t.ticketNumber} · ${t.order.origin}",
+                    fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                    textDecoration = TextDecoration.LineThrough,
+                )
+                Text(
+                    if (t.replacedBy > 0) "Make #${t.replacedBy} instead" else "Stop making this order",
+                    fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White,
+                )
+            }
+            Column(
+                Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                t.order.items.forEach { item ->
+                    Text(
+                        "${item.quantity}×  ${item.name}" + if (item.modifiers.isNotEmpty()) " (${item.modifiers.joinToString()})" else "",
+                        fontSize = 18.sp, textDecoration = TextDecoration.LineThrough,
+                    )
+                }
+            }
+            Button(
+                onClick = onDismiss,
+                colors = ButtonDefaults.buttonColors(containerColor = LateRed, contentColor = Color.White),
+                modifier = Modifier.fillMaxWidth().padding(10.dp).height(64.dp),
+            ) { Text("OK, REMOVE", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
         }
     }
 }

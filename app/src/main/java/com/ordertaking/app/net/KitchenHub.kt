@@ -8,6 +8,7 @@ import com.ordertaking.app.Sounds
 import com.ordertaking.app.data.Ack
 import com.ordertaking.app.data.AppJson
 import com.ordertaking.app.data.AppPrefs
+import com.ordertaking.app.data.CancelOrder
 import com.ordertaking.app.data.HistoryEntry
 import com.ordertaking.app.data.OrderHistory
 import com.ordertaking.app.data.JsonFileStore
@@ -205,6 +206,39 @@ class KitchenHub(
         }
     }
 
+    /**
+     * A cashier called the order off, or [replacedBy] a changed copy of it. An open ticket stays on
+     * screen crossed out until the kitchen taps OK; a finished one just drops off the pickup boards.
+     */
+    private fun cancel(orderId: String, replacedBy: Int = 0) {
+        var shown = false
+        var cancelled: KitchenTicket? = null
+        update { list ->
+            list.map {
+                if (it.order.orderId != orderId || it.status == TicketStatus.CANCELLED) it
+                else {
+                    shown = it.status == TicketStatus.PENDING || it.status == TicketStatus.IN_PROGRESS
+                    it.copy(
+                        status = TicketStatus.CANCELLED,
+                        bumpedAtMillis = System.currentTimeMillis(),
+                        showCancelled = shown,
+                        replacedBy = replacedBy,
+                    ).also { t -> cancelled = t }
+                }
+            }
+        }
+        runCatching { history.markCancelled(orderId) }
+            .onFailure { Log.e("KitchenHub", "Could not mark order cancelled in history", it) }
+        // Always answer, even for a ticket we don't have, so the cashier stops re-sending.
+        broadcast(cancelled?.toStatusUpdate() ?: OrderStatusUpdate(orderId, 0, "", TicketStatus.CANCELLED))
+        if (shown && replacedBy == 0) sounds.newOrder()
+    }
+
+    /** The kitchen has seen a cancelled ticket: take it off the screen. */
+    fun dismissCancelled(orderId: String) {
+        update { list -> list.map { if (it.order.orderId == orderId) it.copy(showCancelled = false) else it } }
+    }
+
     /** Brings the most recently bumped ticket back onto the screen. */
     fun recallLast() {
         val last = _tickets.value.filter { it.isFinished }
@@ -244,11 +278,17 @@ class KitchenHub(
     private fun receive(order: Order): KitchenTicket {
         synchronized(this) {
             _tickets.value.find { it.order.orderId == order.orderId }?.let { return it } // duplicate re-send
-            val ticket = KitchenTicket(order, prefs.nextTicketNumber(), System.currentTimeMillis())
+            val replaced = order.replaces.takeIf { it.isNotBlank() }
+                ?.let { id -> _tickets.value.find { it.order.orderId == id } }
+            val ticket = KitchenTicket(
+                order, prefs.nextTicketNumber(), System.currentTimeMillis(),
+                replacesTicket = replaced?.ticketNumber ?: 0,
+            )
             // Record permanently before acknowledging, so an acknowledged order is never missing from the history.
             runCatching { history.append(HistoryEntry(order, ticket.receivedAtMillis, ticket.ticketNumber)) }
                 .onFailure { Log.e("KitchenHub", "Could not save order to history", it) }
             update { it + ticket }
+            if (order.replaces.isNotBlank()) cancel(order.replaces, replacedBy = ticket.ticketNumber)
             _newTickets.tryEmit(ticket)
             // Played here rather than by the screen, so it sounds whatever the kitchen is showing.
             sounds.newOrder()
@@ -260,7 +300,7 @@ class KitchenHub(
     private fun update(transform: (List<KitchenTicket>) -> List<KitchenTicket>) {
         val next = transform(_tickets.value)
         // Keep every open ticket, but only the 100 most recent finished ones (for recall).
-        val done = next.filter { it.isFinished }
+        val done = next.filter { it.isFinished || (it.status == TicketStatus.CANCELLED && !it.showCancelled) }
             .sortedByDescending { it.bumpedAtMillis ?: 0 }.drop(100).map { it.order.orderId }.toSet()
         val pruned = if (done.isEmpty()) next else next.filterNot { it.order.orderId in done }
         _tickets.value = pruned
@@ -283,6 +323,7 @@ class KitchenHub(
                     reply(encode(Ack(msg.order.orderId, ticket.ticketNumber)))
                 }
                 is SetStatus -> onCashierStatus(msg)
+                is CancelOrder -> cancel(msg.orderId)
                 else -> Unit
             }
         } catch (e: Exception) {

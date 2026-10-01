@@ -9,6 +9,8 @@ data class HistoryEntry(
     val order: Order,
     val recordedAtMillis: Long,
     val ticketNumber: Int = 0,
+    /** Cancelled after it was sent; kept for the record but left out of sales. */
+    val cancelled: Boolean = false,
 )
 
 /**
@@ -41,6 +43,25 @@ class OrderHistory(private val file: File) {
             }.getOrDefault(true)
         }
         if (keep.size == lines.count { it.isNotBlank() }) return false
+        return rewrite(keep)
+    }
+
+    /** Marks an order as cancelled. Returns false if it isn't in the history (or already cancelled). */
+    @Synchronized
+    fun markCancelled(orderId: String): Boolean {
+        if (!file.exists()) return false
+        var changed = false
+        val lines = file.readLines().filter { it.isNotBlank() }.map { line ->
+            val e = runCatching { AppJson.decodeFromString(HistoryEntry.serializer(), line) }.getOrNull()
+            if (e != null && e.order.orderId == orderId && !e.cancelled) {
+                changed = true
+                AppJson.encodeToString(HistoryEntry.serializer(), e.copy(cancelled = true))
+            } else line
+        }
+        return changed && rewrite(lines)
+    }
+
+    private fun rewrite(keep: List<String>): Boolean {
         val tmp = File(file.parentFile, file.name + ".tmp")
         FileOutputStream(tmp).use { out ->
             out.write(keep.joinToString("") { it + "\n" }.toByteArray())

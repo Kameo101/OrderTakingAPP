@@ -126,6 +126,8 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
         val outbox by vm.link.outbox.collectAsStateWithLifecycle()
         val ready by vm.link.ready.collectAsStateWithLifecycle()
         val offlineSince by vm.link.offlineSince.collectAsStateWithLifecycle()
+        val changing by vm.changing.collectAsStateWithLifecycle()
+        var showRecent by remember { mutableStateOf(false) }
         var wifiTipDismissedFor by remember { mutableStateOf(vm.link.wifiTipDismissedFor) }
         val currency = app.prefs.currencySymbol
         var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -150,7 +152,7 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(Modifier.safeDrawingPadding()) {
                 Column(Modifier.fillMaxSize()) {
-                    CashierTopBar(linkState, outbox.size, onSettings, onHistory)
+                    CashierTopBar(linkState, outbox.size, onSettings, onHistory, onRecent = { showRecent = true })
                     AnimatedVisibility(visible = ready.isNotEmpty()) {
                         ReadyStrip(ready, now) { order ->
                             vm.link.markServed(order)
@@ -173,6 +175,7 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
                         val tray = @Composable { m: Modifier ->
                             TrayPane(
                                 cart = cart,
+                                changing = changing,
                                 currency = currency,
                                 onInc = { vm.changeQuantity(it, 1) },
                                 onDec = { vm.changeQuantity(it, -1) },
@@ -249,13 +252,41 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
             )
         }
 
+        if (showRecent) {
+            RecentOrdersDialog(
+                outbox = outbox,
+                currency = currency,
+                onDismiss = { showRecent = false },
+                onCancel = { order ->
+                    if (changing?.orderId == order.orderId) vm.clear()
+                    vm.link.cancel(order.orderId)
+                    scope.launch { snackbar.showSnackbar("Order for ${order.origin} cancelled — the kitchen will see it crossed out") }
+                },
+                onChange = { order, ticket ->
+                    showRecent = false
+                    vm.startChange(order, ticket)
+                },
+            )
+        }
+
         if (sending) {
             SendOrderDialog(
+                initialName = changing?.origin ?: "",
+                changing = changing != null,
                 onDismiss = { sending = false },
                 onSend = { origin ->
                     sending = false
                     val online = linkState is LinkState.Connected
+                    val replaced = changing
                     vm.send(origin)
+                    if (replaced != null) {
+                        scope.launch {
+                            snackbar.showSnackbar(
+                                "Changed order sent — the kitchen will cross out " +
+                                    (if (replaced.ticketNumber > 0) "#${replaced.ticketNumber}" else "the old one"),
+                            )
+                        }
+                    }
                     if (!online) {
                         scope.launch {
                             snackbar.showSnackbar(
@@ -329,7 +360,7 @@ private fun ReadyCard(order: OrderStatusUpdate, now: Long, onHandedOut: () -> Un
 }
 
 @Composable
-private fun CashierTopBar(state: LinkState, queued: Int, onSettings: () -> Unit, onHistory: () -> Unit) {
+private fun CashierTopBar(state: LinkState, queued: Int, onSettings: () -> Unit, onHistory: () -> Unit, onRecent: () -> Unit) {
     Surface(color = MaterialTheme.colorScheme.primary, contentColor = Color.White) {
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
@@ -350,7 +381,10 @@ private fun CashierTopBar(state: LinkState, queued: Int, onSettings: () -> Unit,
                     if (queued > 0) Text("  ·  $queued waiting to send", fontWeight = FontWeight.Bold)
                 }
             }
-            TextButton(onClick = onHistory, modifier = Modifier.padding(start = 8.dp)) {
+            TextButton(onClick = onRecent, modifier = Modifier.padding(start = 8.dp)) {
+                Text("🧾 Recent", color = Color.White, fontSize = 17.sp)
+            }
+            TextButton(onClick = onHistory) {
                 Text("📊 Sales", color = Color.White, fontSize = 17.sp)
             }
             IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
@@ -474,6 +508,7 @@ fun ItemImage(item: MenuItem, modifier: Modifier) {
 @Composable
 private fun TrayPane(
     cart: List<CartLine>,
+    changing: ChangingOrder?,
     currency: String,
     onInc: (String) -> Unit,
     onDec: (String) -> Unit,
@@ -489,7 +524,18 @@ private fun TrayPane(
                     "Order tray (${cart.sumOf { it.quantity }})",
                     fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f),
                 )
-                if (cart.isNotEmpty()) TextButton(onClick = onClear) { Text("Clear") }
+                if (cart.isNotEmpty() && changing == null) TextButton(onClick = onClear) { Text("Clear") }
+            }
+            if (changing != null) {
+                Surface(shape = RoundedCornerShape(10.dp), color = CookingAmber.copy(alpha = 0.25f), modifier = Modifier.padding(bottom = 8.dp)) {
+                    Row(Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "✏ Changing " + (if (changing.ticketNumber > 0) "#${changing.ticketNumber} · " else "") + changing.origin,
+                            fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = onClear) { Text("Stop changing") }
+                    }
+                }
             }
             if (cart.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -517,7 +563,12 @@ private fun TrayPane(
                 colors = ButtonDefaults.buttonColors(containerColor = SendGreen, contentColor = Color.White),
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth().height(76.dp),
-            ) { Text("SEND TO KITCHEN  ➜", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
+            ) {
+                Text(
+                    if (changing != null) "SEND CHANGED ORDER  ➜" else "SEND TO KITCHEN  ➜",
+                    fontSize = 22.sp, fontWeight = FontWeight.Bold,
+                )
+            }
         }
     }
 }
@@ -650,9 +701,9 @@ fun NoteDialog(title: String, initial: String, onDismiss: () -> Unit, onSave: (S
 }
 
 @Composable
-private fun SendOrderDialog(onDismiss: () -> Unit, onSend: (String) -> Unit) {
+private fun SendOrderDialog(initialName: String, changing: Boolean, onDismiss: () -> Unit, onSend: (String) -> Unit) {
     val prefs = App.instance.prefs
-    var name by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf(initialName) }
     var staff by remember { mutableStateOf(prefs.staffName) }
     val focus = remember { FocusRequester() }
     LaunchedEffect(Unit) { focus.requestFocus() }
@@ -693,7 +744,7 @@ private fun SendOrderDialog(onDismiss: () -> Unit, onSend: (String) -> Unit) {
                 enabled = origin != null,
                 colors = ButtonDefaults.buttonColors(containerColor = SendGreen),
                 modifier = Modifier.height(56.dp),
-            ) { Text("SEND TO KITCHEN", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+            ) { Text(if (changing) "SEND CHANGED ORDER" else "SEND TO KITCHEN", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Back") } },
     )
