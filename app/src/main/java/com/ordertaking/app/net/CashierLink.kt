@@ -1,5 +1,6 @@
 package com.ordertaking.app.net
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.util.Log
 import com.ordertaking.app.data.Ack
@@ -34,6 +35,7 @@ import org.java_websocket.handshake.ServerHandshake
 import java.io.File
 import java.net.URI
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 sealed class LinkState {
     data object Searching : LinkState()
@@ -42,14 +44,25 @@ sealed class LinkState {
     data class Offline(val host: String) : LinkState()
 }
 
+/** The open link to the kitchen, over Wi-Fi or Bluetooth. */
+private interface KitchenConn {
+    val isUp: Boolean
+    fun sendText(text: String)
+    fun shutdown()
+}
+
 /**
  * Runs on a cashier tablet. Keeps a connection to the kitchen open and delivers orders.
  *
  * Every order goes into a persisted outbox first and only leaves it once the kitchen
  * acknowledges it, so an order taken while the Wi-Fi blips is sent automatically
  * when the connection comes back.
+ *
+ * Talks to the kitchen over Wi-Fi by default, or over Bluetooth when that's switched on
+ * in Settings (for when the Wi-Fi is unreliable).
  */
 class CashierLink(context: Context, private val prefs: AppPrefs, private val history: OrderHistory) {
+    private val appContext = context.applicationContext
     private val outboxStore = JsonFileStore(
         File(context.filesDir, "outbox.json"),
         ListSerializer(Order.serializer()),
@@ -60,6 +73,13 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
 
     private val _state = MutableStateFlow<LinkState>(LinkState.Searching)
     val state: StateFlow<LinkState> = _state.asStateFlow()
+
+    /** When the link to the kitchen was last lost (or the app started without one); null while connected. */
+    private val _offlineSince = MutableStateFlow<Long?>(System.currentTimeMillis())
+    val offlineSince: StateFlow<Long?> = _offlineSince.asStateFlow()
+
+    /** The outage (its [offlineSince]) the "Wi-Fi isn't working" tip was dismissed for. */
+    @Volatile var wifiTipDismissedFor: Long? = null
 
     private val _acks = MutableSharedFlow<Ack>(extraBufferCapacity = 32)
     val acks: SharedFlow<Ack> = _acks.asSharedFlow()
@@ -84,12 +104,23 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
     private val finder = KitchenFinder(context) { discoveredHost = it }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Sends one at a time, in order, off the main thread (a Bluetooth write can block). */
+    private val sendQueue = Dispatchers.IO.limitedParallelism(1)
     private var loop: Job? = null
-    @Volatile private var client: Client? = null
+    @Volatile private var client: KitchenConn? = null
     @Volatile private var lastFlush = 0L
     /** Addresses that just failed, and when they may be tried again. */
     private val backoff = java.util.concurrent.ConcurrentHashMap<String, Long>()
     @Volatile private var lastScanAt = 0L
+
+    init {
+        scope.launch {
+            _state.collect { s ->
+                if (s is LinkState.Connected) _offlineSince.value = null
+                else if (_offlineSince.value == null) _offlineSince.value = System.currentTimeMillis()
+            }
+        }
+    }
 
     @Synchronized
     fun start() {
@@ -98,7 +129,7 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
         loop = scope.launch {
             while (isActive) {
                 val c = client
-                if (c == null || !c.isOpen) {
+                if (c == null || !c.isUp) {
                     connectOnce()
                 } else if ((_outbox.value.isNotEmpty() || servedPending.isNotEmpty()) && System.currentTimeMillis() - lastFlush > 5_000) {
                     flush(c) // No ack yet: resend. The kitchen ignores duplicates.
@@ -113,14 +144,14 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
         loop?.cancel()
         loop = null
         finder.stop()
-        client?.let { runCatching { it.close() } }
+        client?.let { runCatching { it.shutdown() } }
         client = null
         _state.value = LinkState.Searching
     }
 
     /** Drop the current connection and try again right away (e.g. after the address changed). */
     fun reconnect() {
-        client?.let { runCatching { it.close() } }
+        client?.let { runCatching { it.shutdown() } }
         client = null
         if (loop != null) {
             stop()
@@ -134,7 +165,7 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
             _outbox.value = next
             outboxStore.save(next)
         }
-        client?.takeIf { it.isOpen }?.let { c -> scope.launch { flush(c) } }
+        client?.takeIf { it.isUp }?.let { c -> scope.launch { flush(c) } }
     }
 
     /** The order was handed to the customer: clear it here and on every other tablet. */
@@ -152,8 +183,9 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
     }
 
     private fun sendStatus(orderId: String, status: TicketStatus) {
-        client?.takeIf { it.isOpen }?.let { c ->
-            runCatching { c.send(AppJson.encodeToString(WireMessage.serializer(), SetStatus(orderId, status))) }
+        val c = client?.takeIf { it.isUp } ?: return
+        scope.launch(sendQueue) {
+            runCatching { c.sendText(AppJson.encodeToString(WireMessage.serializer(), SetStatus(orderId, status))) }
         }
     }
 
@@ -205,6 +237,7 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
     }
 
     private suspend fun connectOnce() {
+        if (prefs.useBluetooth) return connectBluetooth()
         val host = pickHost()
         if (host == null) {
             _state.value = LinkState.Searching
@@ -231,13 +264,74 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
         }
     }
 
-    private fun flush(c: Client) {
+    /** Connects to the kitchen tablet chosen in Settings over Bluetooth. */
+    @SuppressLint("MissingPermission")
+    private fun connectBluetooth() {
+        val address = prefs.btKitchenAddress
+        if (address.isBlank()) {
+            _state.value = LinkState.Searching
+            return
+        }
+        val label = "${prefs.btKitchenName.ifBlank { address }} (Bluetooth)"
+        val adapter = bluetoothAdapter(appContext)
+        if (adapter == null || !hasBluetoothPermission(appContext) || !adapter.isEnabled ||
+            (backoff[address] ?: 0) > System.currentTimeMillis()
+        ) {
+            _state.value = LinkState.Offline(label)
+            return
+        }
+        _state.value = LinkState.Connecting(label)
+        val socket = runCatching {
+            adapter.getRemoteDevice(address).createRfcommSocketToServiceRecord(KITCHEN_BT_UUID).also { it.connect() }
+        }.getOrElse {
+            Log.w("CashierLink", "Bluetooth connect failed: ${it.message}")
+            backoff[address] = System.currentTimeMillis() + 5_000
+            _state.value = LinkState.Offline(label)
+            return
+        }
+        val line = BtLine(socket)
+        val c = object : KitchenConn {
+            override val isUp get() = line.isOpen
+            override fun sendText(text: String) = line.send(text)
+            override fun shutdown() = line.close()
+        }
+        client = c
+        backoff.remove(address)
+        _state.value = LinkState.Connected(label)
+        thread(isDaemon = true, name = "cashier-bt") {
+            line.readLoop(::onMessage)
+            onDisconnected(c, label)
+        }
+        flush(c)
+    }
+
+    private fun onMessage(message: String) {
+        try {
+            when (val msg = AppJson.decodeFromString(WireMessage.serializer(), message)) {
+                is Ack -> onAck(msg)
+                is OrderStatusUpdate -> onStatus(msg)
+                is ReadyList -> onReadyList(msg)
+                else -> Unit
+            }
+        } catch (e: Exception) {
+            Log.e("CashierLink", "Bad message: $message", e)
+        }
+    }
+
+    private fun onDisconnected(c: KitchenConn, label: String) {
+        if (client === c) {
+            client = null
+            _state.value = LinkState.Offline(label)
+        }
+    }
+
+    private fun flush(c: KitchenConn) {
         lastFlush = System.currentTimeMillis()
         for (id in servedPending) {
-            runCatching { c.send(AppJson.encodeToString(WireMessage.serializer(), SetStatus(id, TicketStatus.SERVED))) }
+            runCatching { c.sendText(AppJson.encodeToString(WireMessage.serializer(), SetStatus(id, TicketStatus.SERVED))) }
         }
         for (order in _outbox.value) {
-            runCatching { c.send(AppJson.encodeToString(WireMessage.serializer(), SubmitOrder(order))) }
+            runCatching { c.sendText(AppJson.encodeToString(WireMessage.serializer(), SubmitOrder(order))) }
                 .onFailure { Log.w("CashierLink", "send failed", it); return }
         }
     }
@@ -255,28 +349,16 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
         }
     }
 
-    private inner class Client(uri: URI, private val host: String) : WebSocketClient(uri) {
+    private inner class Client(uri: URI, private val host: String) : WebSocketClient(uri), KitchenConn {
+        override val isUp get() = isOpen
+        override fun sendText(text: String) = send(text)
+        override fun shutdown() = close()
+
         override fun onOpen(handshake: ServerHandshake) {}
 
-        override fun onMessage(message: String) {
-            try {
-                when (val msg = AppJson.decodeFromString(WireMessage.serializer(), message)) {
-                    is Ack -> onAck(msg)
-                    is OrderStatusUpdate -> onStatus(msg)
-                    is ReadyList -> onReadyList(msg)
-                    else -> Unit
-                }
-            } catch (e: Exception) {
-                Log.e("CashierLink", "Bad message: $message", e)
-            }
-        }
+        override fun onMessage(message: String) = this@CashierLink.onMessage(message)
 
-        override fun onClose(code: Int, reason: String?, remote: Boolean) {
-            if (client === this) {
-                client = null
-                _state.value = LinkState.Offline(host)
-            }
-        }
+        override fun onClose(code: Int, reason: String?, remote: Boolean) = onDisconnected(this, host)
 
         override fun onError(ex: Exception) {
             Log.w("CashierLink", "Connection error: ${ex.message}")

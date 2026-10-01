@@ -80,6 +80,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
@@ -91,6 +92,9 @@ import com.ordertaking.app.net.LinkState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+
+/** How long the Wi-Fi link must be down before suggesting Bluetooth. */
+private const val WIFI_TIP_AFTER_MILLIS = 5 * 60 * 1000L
 
 @Composable
 fun CashierScreen(onSwitchMode: () -> Unit, vm: CashierViewModel = viewModel()) {
@@ -121,6 +125,8 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
         val linkState by vm.link.state.collectAsStateWithLifecycle()
         val outbox by vm.link.outbox.collectAsStateWithLifecycle()
         val ready by vm.link.ready.collectAsStateWithLifecycle()
+        val offlineSince by vm.link.offlineSince.collectAsStateWithLifecycle()
+        var wifiTipDismissedFor by remember { mutableStateOf(vm.link.wifiTipDismissedFor) }
         val currency = app.prefs.currencySymbol
         var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
         LaunchedEffect(Unit) {
@@ -214,6 +220,31 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
                 onSave = {
                     vm.setNotes(line.key, it)
                     noteFor = null
+                },
+            )
+        }
+
+        // Wi-Fi down for 5 minutes: suggest Bluetooth. Stays up until OK is tapped or the Wi-Fi comes back.
+        val outage = offlineSince
+        if (outage != null && !app.prefs.useBluetooth && outage != wifiTipDismissedFor &&
+            now - outage >= WIFI_TIP_AFTER_MILLIS
+        ) {
+            AlertDialog(
+                onDismissRequest = {},
+                properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false),
+                title = { Text("📶 The Wi-Fi isn't working") },
+                text = {
+                    Text(
+                        "This tablet hasn't been able to reach the kitchen over Wi-Fi for ${(now - outage) / 60_000} minutes. " +
+                            "Orders are being saved and will send when it's back.\n\n" +
+                            "If the Wi-Fi keeps giving trouble, try Bluetooth instead: ⚙ Settings → Connect by Bluetooth.",
+                    )
+                },
+                confirmButton = {
+                    Button(onClick = {
+                        wifiTipDismissedFor = outage
+                        vm.link.wifiTipDismissedFor = outage
+                    }) { Text("OK") }
                 },
             )
         }

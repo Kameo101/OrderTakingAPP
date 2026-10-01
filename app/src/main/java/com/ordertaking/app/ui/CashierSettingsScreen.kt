@@ -1,7 +1,9 @@
 package com.ordertaking.app.ui
 
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -41,6 +43,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -69,8 +72,11 @@ import com.ordertaking.app.App
 import com.ordertaking.app.data.MenuItem
 import com.ordertaking.app.data.MenuRepository
 import com.ordertaking.app.data.ModifierGroup
+import com.ordertaking.app.net.BLUETOOTH_PERMISSION
 import com.ordertaking.app.net.KITCHEN_PORT
 import com.ordertaking.app.net.LinkState
+import com.ordertaking.app.net.hasBluetoothPermission
+import com.ordertaking.app.net.pairedDevices
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -83,6 +89,7 @@ fun CashierSettingsScreen(onBack: () -> Unit, onSwitchMode: () -> Unit) {
     val menu by app.menu.items.collectAsStateWithLifecycle()
     val linkState by app.cashierLink.state.collectAsStateWithLifecycle()
     val outbox by app.cashierLink.outbox.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     var host by remember { mutableStateOf(prefs.kitchenHost) }
     var staff by remember { mutableStateOf(prefs.staffName) }
@@ -90,6 +97,17 @@ fun CashierSettingsScreen(onBack: () -> Unit, onSwitchMode: () -> Unit) {
     var editing by remember { mutableStateOf<MenuItem?>(null) }
     var confirmSwitch by remember { mutableStateOf(false) }
     var confirmDiscard by remember { mutableStateOf(false) }
+
+    var bluetooth by remember { mutableStateOf(prefs.useBluetooth) }
+    var btKitchen by remember { mutableStateOf(prefs.btKitchenAddress) }
+    var btAllowed by remember { mutableStateOf(hasBluetoothPermission(app)) }
+    var btTutorial by remember { mutableStateOf(false) }
+    var paired by remember { mutableStateOf(pairedDevices(app)) }
+    val refreshPaired = {
+        btAllowed = hasBluetoothPermission(app)
+        paired = pairedDevices(app)
+    }
+    val askBluetooth = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refreshPaired() }
 
     val leave = {
         prefs.staffName = staff
@@ -113,35 +131,99 @@ fun CashierSettingsScreen(onBack: () -> Unit, onSwitchMode: () -> Unit) {
             ) {
                 item { SectionTitle("Kitchen connection") }
                 item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Connect by Bluetooth", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                            Text(
+                                if (bluetooth) "On: orders go to the kitchen over Bluetooth instead of Wi-Fi."
+                                else "Off: connects to the kitchen over Wi-Fi or a hotspot. Turn on if the Wi-Fi is giving trouble.",
+                                fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                            )
+                        }
+                        Switch(checked = bluetooth, onCheckedChange = {
+                            bluetooth = it
+                            prefs.useBluetooth = it
+                            app.cashierLink.reconnect()
+                            if (it) btTutorial = true
+                            if (it && !btAllowed && BLUETOOTH_PERMISSION != null) askBluetooth.launch(BLUETOOTH_PERMISSION)
+                        })
+                    }
+                }
+                item {
                     Text(
                         when (val s = linkState) {
                             is LinkState.Connected -> "✅ Connected to kitchen at ${s.host}"
                             is LinkState.Connecting -> "Connecting to ${s.host}…"
-                            is LinkState.Searching -> "Searching the Wi-Fi for the kitchen tablet…"
-                            is LinkState.Offline -> "❌ Can't reach kitchen at ${s.host}"
+                            is LinkState.Searching ->
+                                if (bluetooth) "Choose the kitchen tablet below." else "Searching the Wi-Fi for the kitchen tablet…"
+                            is LinkState.Offline ->
+                                if (bluetooth) "❌ Can't reach kitchen at ${s.host}. Check Bluetooth is on and the kitchen has Bluetooth switched on in its settings."
+                                else "❌ Can't reach kitchen at ${s.host}"
                         },
                     )
-                    Text(
-                        "Leave the address blank to find the kitchen automatically. If that doesn't work, " +
-                            "type the IP address shown at the top of the kitchen screen.",
-                        fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                    )
                 }
-                item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = host, onValueChange = { host = it },
-                            label = { Text("Kitchen IP address (optional), e.g. 192.168.1.20") },
-                            singleLine = true,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                            modifier = Modifier.weight(1f),
+                if (bluetooth) {
+                    if (!btAllowed) {
+                        item {
+                            Text("Bluetooth needs the \"Nearby devices\" permission.", color = LateRed)
+                            OutlinedButton(onClick = { BLUETOOTH_PERMISSION?.let { askBluetooth.launch(it) } }) { Text("Allow Bluetooth") }
+                        }
+                    }
+                    item {
+                        Text(
+                            "Kitchen tablet (pair it first in Android's Bluetooth settings, and turn on Bluetooth in the kitchen's settings):",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                         )
-                        Spacer(Modifier.width(12.dp))
-                        Button(onClick = {
-                            prefs.kitchenHost = host.trim().removePrefix("ws://").substringBefore(":$KITCHEN_PORT")
-                            host = prefs.kitchenHost
+                    }
+                    items(paired, key = { it.address }) { device ->
+                        Card(onClick = {
+                            btKitchen = device.address
+                            prefs.btKitchenAddress = device.address
+                            prefs.btKitchenName = device.name
                             app.cashierLink.reconnect()
-                        }) { Text("Save & reconnect") }
+                        }) {
+                            Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                RadioButton(selected = device.address == btKitchen, onClick = null)
+                                Spacer(Modifier.width(8.dp))
+                                Text(device.name, fontSize = 17.sp, modifier = Modifier.weight(1f))
+                                Text(device.address, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                    item {
+                        if (btAllowed && paired.isEmpty()) Text("No paired Bluetooth devices yet.")
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            OutlinedButton(onClick = {
+                                runCatching { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }
+                            }) { Text("Open Bluetooth settings") }
+                            OutlinedButton(onClick = refreshPaired) { Text("Refresh list") }
+                            OutlinedButton(onClick = { btTutorial = true }) { Text("Show me how") }
+                        }
+                    }
+                } else {
+                    item {
+                        Text(
+                            "Leave the address blank to find the kitchen automatically. If that doesn't work, " +
+                                "type the IP address shown at the top of the kitchen screen.",
+                            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        )
+                    }
+                    item {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedTextField(
+                                value = host, onValueChange = { host = it },
+                                label = { Text("Kitchen IP address (optional), e.g. 192.168.1.20") },
+                                singleLine = true,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(12.dp))
+                            Button(onClick = {
+                                prefs.kitchenHost = host.trim().removePrefix("ws://").substringBefore(":$KITCHEN_PORT")
+                                host = prefs.kitchenHost
+                                app.cashierLink.reconnect()
+                            }) { Text("Save & reconnect") }
+                        }
                     }
                 }
                 if (outbox.isNotEmpty()) {
@@ -226,6 +308,16 @@ fun CashierSettingsScreen(onBack: () -> Unit, onSwitchMode: () -> Unit) {
             onSave = { app.menu.upsert(it); editing = null },
             onDelete = { app.menu.delete(item.id); editing = null },
         )
+    }
+
+    if (btTutorial) {
+        BluetoothTutorial(
+            forKitchen = false,
+            kitchenName = paired.find { it.address == btKitchen }?.name,
+        ) {
+            btTutorial = false
+            refreshPaired() // they may have just paired the kitchen
+        }
     }
 
     if (confirmSwitch) {

@@ -1,5 +1,7 @@
 package com.ordertaking.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -54,7 +56,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.ordertaking.app.App
 import com.ordertaking.app.data.KitchenTicket
 import com.ordertaking.app.data.TicketStatus
+import com.ordertaking.app.net.BLUETOOTH_PERMISSION
 import com.ordertaking.app.net.KITCHEN_PORT
+import com.ordertaking.app.net.bluetoothName
+import com.ordertaking.app.net.hasBluetoothPermission
 import com.ordertaking.app.net.localIpAddresses
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
@@ -74,6 +79,7 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
     val tickets by hub.tickets.collectAsStateWithLifecycle()
     val tablets by hub.connectedTablets.collectAsStateWithLifecycle()
     val error by hub.serverError.collectAsStateWithLifecycle()
+    val btStatus by hub.bluetoothStatus.collectAsStateWithLifecycle()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var showSettings by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
@@ -111,7 +117,8 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                         Text("Kitchen · ${active.size} open", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color.White)
                         Text(
                             if (error != null) "⚠ Not receiving orders: $error"
-                            else "Address: ${ips.firstOrNull() ?: "no Wi-Fi"}  ·  $tablets cashier tablet(s) connected",
+                            else "Address: ${ips.firstOrNull() ?: "no Wi-Fi"}  ·  $tablets cashier tablet(s) connected" +
+                                (btStatus?.let { "  ·  Bluetooth: $it" } ?: ""),
                             fontSize = 14.sp,
                             color = if (error != null) Color(0xFFFF8A80) else Color(0xFFB0BEC5),
                         )
@@ -187,6 +194,46 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                                 cashierHandsOut = it
                                 hub.setCashierHandsOut(it)
                             })
+                        }
+                        HorizontalDivider()
+                        var bluetooth by remember { mutableStateOf(app.prefs.kitchenBluetooth) }
+                        var btAllowed by remember { mutableStateOf(hasBluetoothPermission(app)) }
+                        var btTutorial by remember { mutableStateOf(false) }
+                        val askBluetooth = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+                            btAllowed = it
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Bluetooth connection", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                                Text(
+                                    if (bluetooth) "Cashier tablets can also connect over Bluetooth. Wi-Fi cashiers keep working."
+                                    else "Off: cashier tablets connect over Wi-Fi only.",
+                                    fontSize = 13.sp,
+                                )
+                            }
+                            Switch(checked = bluetooth, onCheckedChange = {
+                                bluetooth = it
+                                hub.setKitchenBluetooth(it)
+                                if (it) btTutorial = true
+                                if (it && !btAllowed && BLUETOOTH_PERMISSION != null) askBluetooth.launch(BLUETOOTH_PERMISSION)
+                            })
+                        }
+                        if (bluetooth) {
+                            if (!btAllowed) {
+                                Text("Bluetooth needs the \"Nearby devices\" permission.", color = LateRed)
+                                OutlinedButton(onClick = { BLUETOOTH_PERMISSION?.let { askBluetooth.launch(it) } }) { Text("Allow Bluetooth") }
+                            }
+                            Text(
+                                "Pair each cashier tablet with this one in Android's Bluetooth settings, then on the cashier " +
+                                    "turn on Settings → Connect by Bluetooth and pick " +
+                                    (bluetoothName(app)?.let { "\"$it\"" } ?: "this tablet") + ".",
+                                fontSize = 13.sp,
+                            )
+                            btStatus?.let { Text("Status: $it", fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                            OutlinedButton(onClick = { btTutorial = true }) { Text("Show me how") }
+                        }
+                        if (btTutorial) {
+                            BluetoothTutorial(forKitchen = true, kitchenName = bluetoothName(app)) { btTutorial = false }
                         }
                         HorizontalDivider()
                         Text("Cashier tablets find this kitchen automatically on the same Wi-Fi.")

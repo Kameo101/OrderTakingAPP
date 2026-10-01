@@ -1,5 +1,7 @@
 package com.ordertaking.app.net
 
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothServerSocket
 import android.content.Context
 import android.util.Log
 import com.ordertaking.app.Sounds
@@ -28,13 +30,19 @@ import org.java_websocket.WebSocket
 import org.java_websocket.handshake.ClientHandshake
 import org.java_websocket.server.WebSocketServer
 import java.io.File
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.util.Collections
+import java.util.concurrent.Executors
+import kotlin.concurrent.thread
 
 /**
  * Runs on the kitchen tablet. Accepts orders from cashier tablets over a WebSocket,
  * keeps the ticket list (persisted, so a restart doesn't lose orders) and pushes
  * "ready" notices back to the cashiers when a ticket is bumped.
+ *
+ * When Bluetooth is switched on in Kitchen settings, cashiers can also connect over
+ * Bluetooth; both kinds of cashier work side by side.
  */
 class KitchenHub(
     context: Context,
@@ -42,6 +50,8 @@ class KitchenHub(
     private val history: OrderHistory,
     private val sounds: Sounds,
 ) {
+    private val appContext = context.applicationContext
+
     private val store = JsonFileStore(
         File(context.filesDir, "kitchen_tickets.json"),
         ListSerializer(KitchenTicket.serializer()),
@@ -56,6 +66,17 @@ class KitchenHub(
     private val _serverError = MutableStateFlow<String?>(null)
     val serverError: StateFlow<String?> = _serverError.asStateFlow()
 
+    /** What the Bluetooth listener is doing, or null when Bluetooth is switched off. */
+    private val _bluetoothStatus = MutableStateFlow<String?>(null)
+    val bluetoothStatus: StateFlow<String?> = _bluetoothStatus.asStateFlow()
+
+    @Volatile private var wifiTablets = 0
+    private val btClients = Collections.synchronizedSet(mutableSetOf<BtLine>())
+    @Volatile private var btThread: Thread? = null
+    @Volatile private var btServerSocket: BluetoothServerSocket? = null
+    /** Bluetooth writes can block, so broadcasts go out on their own thread. */
+    private val btSender = Executors.newSingleThreadExecutor()
+
     private val _newTickets = MutableSharedFlow<KitchenTicket>(extraBufferCapacity = 32)
     val newTickets: SharedFlow<KitchenTicket> = _newTickets.asSharedFlow()
 
@@ -68,6 +89,7 @@ class KitchenHub(
 
     @Synchronized
     fun start() {
+        if (prefs.kitchenBluetooth) startBluetooth()
         if (server != null) return
         val s = Server()
         s.isReuseAddr = true
@@ -82,7 +104,75 @@ class KitchenHub(
         advertiser.stop()
         runCatching { server?.stop(1000) }
         server = null
-        _connectedTablets.value = 0
+        wifiTablets = 0
+        stopBluetooth()
+        updateTabletCount()
+    }
+
+    fun setKitchenBluetooth(on: Boolean) {
+        prefs.kitchenBluetooth = on
+        if (on) startBluetooth() else stopBluetooth()
+    }
+
+    /** Listens for cashier tablets over Bluetooth, retrying while Bluetooth is off or not yet allowed. */
+    @Synchronized
+    @SuppressLint("MissingPermission")
+    private fun startBluetooth() {
+        if (btThread != null) return
+        _bluetoothStatus.value = "Starting…"
+        btThread = thread(isDaemon = true, name = "kitchen-bt") {
+            val me = Thread.currentThread()
+            while (btThread === me) {
+                val adapter = bluetoothAdapter(appContext)
+                when {
+                    adapter == null -> _bluetoothStatus.value = "This tablet has no Bluetooth"
+                    !hasBluetoothPermission(appContext) -> _bluetoothStatus.value = "Allow Bluetooth in Kitchen settings"
+                    !adapter.isEnabled -> _bluetoothStatus.value = "Bluetooth is turned off on this tablet"
+                    else -> {
+                        var ss: BluetoothServerSocket? = null
+                        try {
+                            ss = adapter.listenUsingRfcommWithServiceRecord(KITCHEN_BT_SERVICE, KITCHEN_BT_UUID)
+                            btServerSocket = ss
+                            if (btThread !== me) ss.close()
+                            _bluetoothStatus.value = "Ready"
+                            while (btThread === me) serveBluetooth(BtLine(ss.accept()))
+                        } catch (e: IOException) {
+                            Log.w("KitchenHub", "Bluetooth listener stopped: ${e.message}")
+                        } catch (e: SecurityException) {
+                            _bluetoothStatus.value = "Allow Bluetooth in Kitchen settings"
+                        } finally {
+                            ss?.let { runCatching { it.close() } }
+                            if (btServerSocket === ss) btServerSocket = null
+                        }
+                    }
+                }
+                if (btThread === me) runCatching { Thread.sleep(3_000) }
+            }
+        }
+    }
+
+    @Synchronized
+    private fun stopBluetooth() {
+        btThread = null
+        btServerSocket?.let { runCatching { it.close() } }
+        btClients.toList().forEach { it.close() }
+        _bluetoothStatus.value = null
+    }
+
+    private fun serveBluetooth(line: BtLine) {
+        btClients.add(line)
+        updateTabletCount()
+        thread(isDaemon = true, name = "kitchen-bt-client") {
+            // Catch the cashier up on anything that became ready while it was away.
+            runCatching { line.send(encode(readyList())) }
+            line.readLoop { message -> handle(message) { reply -> line.send(reply) } }
+            btClients.remove(line)
+            updateTabletCount()
+        }
+    }
+
+    private fun updateTabletCount() {
+        _connectedTablets.value = wifiTablets + btClients.size
     }
 
     fun setStatus(orderId: String, status: TicketStatus) {
@@ -178,7 +268,26 @@ class KitchenHub(
     }
 
     private fun broadcast(msg: WireMessage) {
-        runCatching { server?.broadcast(encode(msg)) }
+        val text = encode(msg)
+        runCatching { server?.broadcast(text) }
+        val bt = btClients.toList()
+        if (bt.isNotEmpty()) btSender.execute { bt.forEach { runCatching { it.send(text) } } }
+    }
+
+    /** A message from a cashier tablet, over Wi-Fi or Bluetooth. */
+    private fun handle(message: String, reply: (String) -> Unit) {
+        try {
+            when (val msg = AppJson.decodeFromString(WireMessage.serializer(), message)) {
+                is SubmitOrder -> {
+                    val ticket = receive(msg.order)
+                    reply(encode(Ack(msg.order.orderId, ticket.ticketNumber)))
+                }
+                is SetStatus -> onCashierStatus(msg)
+                else -> Unit
+            }
+        } catch (e: Exception) {
+            Log.e("KitchenHub", "Bad message: $message", e)
+        }
     }
 
     private val KitchenTicket.isFinished get() = status == TicketStatus.DONE || status == TicketStatus.SERVED
@@ -198,30 +307,19 @@ class KitchenHub(
 
         override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
             clients.add(conn)
-            _connectedTablets.value = clients.size
+            wifiTablets = clients.size
+            updateTabletCount()
             // Catch the cashier up on anything that became ready while it was away.
             runCatching { conn.send(encode(readyList())) }
         }
 
         override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
             clients.remove(conn)
-            _connectedTablets.value = clients.size
+            wifiTablets = clients.size
+            updateTabletCount()
         }
 
-        override fun onMessage(conn: WebSocket, message: String) {
-            try {
-                when (val msg = AppJson.decodeFromString(WireMessage.serializer(), message)) {
-                    is SubmitOrder -> {
-                        val ticket = receive(msg.order)
-                        conn.send(encode(Ack(msg.order.orderId, ticket.ticketNumber)))
-                    }
-                    is SetStatus -> onCashierStatus(msg)
-                    else -> Unit
-                }
-            } catch (e: Exception) {
-                Log.e("KitchenHub", "Bad message: $message", e)
-            }
-        }
+        override fun onMessage(conn: WebSocket, message: String) = handle(message) { conn.send(it) }
 
         override fun onError(conn: WebSocket?, ex: Exception) {
             Log.e("KitchenHub", "Server error", ex)

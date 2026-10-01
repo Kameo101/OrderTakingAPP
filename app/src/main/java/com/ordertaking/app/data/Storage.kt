@@ -51,6 +51,25 @@ class AppPrefs(context: Context) {
         get() = sp.getString("last_kitchen_host", "") ?: ""
         set(v) = sp.edit().putString("last_kitchen_host", v).apply()
 
+    /** Cashier setting. On: talk to the kitchen over Bluetooth instead of Wi-Fi. */
+    var useBluetooth: Boolean
+        get() = sp.getBoolean("use_bluetooth", false)
+        set(v) = sp.edit().putBoolean("use_bluetooth", v).apply()
+
+    /** Bluetooth address and name of the kitchen tablet this cashier connects to. */
+    var btKitchenAddress: String
+        get() = sp.getString("bt_kitchen_address", "") ?: ""
+        set(v) = sp.edit().putString("bt_kitchen_address", v).apply()
+
+    var btKitchenName: String
+        get() = sp.getString("bt_kitchen_name", "") ?: ""
+        set(v) = sp.edit().putString("bt_kitchen_name", v).apply()
+
+    /** Kitchen setting. On: also accept cashier tablets over Bluetooth (Wi-Fi keeps working). */
+    var kitchenBluetooth: Boolean
+        get() = sp.getBoolean("kitchen_bluetooth", false)
+        set(v) = sp.edit().putBoolean("kitchen_bluetooth", v).apply()
+
     /** Name of the cashier using this tablet; printed on tickets as "taken by". */
     var staffName: String
         get() = sp.getString("staff_name", "") ?: ""

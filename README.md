@@ -57,6 +57,18 @@ Turn on the hotspot, connect every tablet to it, and open the app. Cashiers find
 
 The app doesn't use the internet, so it works with no mobile data — the hotspot just has to be switched on. Use a phone as the hotspot and connect all the tablets to it.
 
+### Using Bluetooth instead of Wi-Fi
+
+If the Wi-Fi or hotspot is giving trouble, cashiers can connect to the kitchen over Bluetooth instead. Wi-Fi stays the default.
+
+1. Pair each cashier tablet with the kitchen tablet in Android's **Settings → Bluetooth** (one time).
+2. Kitchen: **Kitchen settings → Bluetooth connection** on (allow the "Nearby devices" permission). Wi-Fi cashiers keep working alongside Bluetooth ones.
+3. Cashier: **Settings → Connect by Bluetooth** on, then tap the kitchen tablet in the list of paired devices.
+
+Bluetooth reaches about 10 m and the kitchen takes a handful of Bluetooth cashiers at once. Unsent orders are kept and delivered the same way as over Wi-Fi. Turn the cashier switch off to go back to Wi-Fi.
+
+Switching Bluetooth on (on either tablet) opens a step-by-step guide with pictures; **Show me how** reopens it. If a cashier on Wi-Fi can't reach the kitchen for 5 minutes, a tip suggests trying Bluetooth. It stays until **OK** is tapped, or closes by itself when the Wi-Fi comes back.
+
 Tips: keep the kitchen tablet plugged in (the app keeps the screen on), and give it a fixed IP (DHCP reservation in your router) if you use the manual address.
 
 ## Building
