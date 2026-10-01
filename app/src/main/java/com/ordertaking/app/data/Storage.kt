@@ -68,6 +68,14 @@ class AppPrefs(context: Context) {
         @Synchronized get() = sp.getLong("ready_since", 0).takeIf { it > 0 }
             ?: System.currentTimeMillis().also { sp.edit().putLong("ready_since", it).apply() }
 
+    /**
+     * Kitchen setting. Off (default): the kitchen hands orders out, so DONE finishes the order.
+     * On: DONE puts the order on the cashiers' "Ready for pickup" board until a cashier hands it out.
+     */
+    var cashierHandsOut: Boolean
+        get() = sp.getBoolean("cashier_hands_out", false)
+        set(v) = sp.edit().putBoolean("cashier_hands_out", v).apply()
+
     /** Ticket numbers restart at 1 every day. */
     @Synchronized
     fun nextTicketNumber(): Int {

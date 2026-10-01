@@ -102,6 +102,19 @@ class KitchenHub(
         changed?.let { broadcast(it.toStatusUpdate()) }
     }
 
+    /** The DONE button: finished outright, or sent to the cashiers' pickup board if they hand orders out. */
+    fun bump(orderId: String) =
+        setStatus(orderId, if (prefs.cashierHandsOut) TicketStatus.DONE else TicketStatus.SERVED)
+
+    fun setCashierHandsOut(on: Boolean) {
+        prefs.cashierHandsOut = on
+        if (!on) {
+            // The kitchen hands out from now on: clear anything still waiting on the cashiers' boards.
+            update { list -> list.map { if (it.status == TicketStatus.DONE) it.copy(status = TicketStatus.SERVED) else it } }
+            broadcast(ReadyList(emptyList()))
+        }
+    }
+
     /** Brings the most recently bumped ticket back onto the screen. */
     fun recallLast() {
         val last = _tickets.value.filter { it.isFinished }

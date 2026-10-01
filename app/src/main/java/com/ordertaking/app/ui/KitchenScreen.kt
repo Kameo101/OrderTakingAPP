@@ -31,7 +31,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -155,7 +157,7 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                                 t, now,
                                 onStart = { hub.setStatus(t.order.orderId, TicketStatus.IN_PROGRESS) },
                                 onUndoStart = { hub.setStatus(t.order.orderId, TicketStatus.PENDING) },
-                                onBump = { hub.setStatus(t.order.orderId, TicketStatus.DONE) },
+                                onBump = { hub.bump(t.order.orderId) },
                                 modifier = Modifier.width(300.dp).fillMaxHeight(),
                             )
                         }
@@ -170,7 +172,23 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                 onDismissRequest = { showSettings = false },
                 title = { Text("Kitchen settings") },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        var cashierHandsOut by remember { mutableStateOf(app.prefs.cashierHandsOut) }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Cashier hands out orders", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                                Text(
+                                    if (cashierHandsOut) "DONE shows the order on the cashier's \"Ready for pickup\" board until they hand it out."
+                                    else "Off: the kitchen hands out orders. DONE finishes the order.",
+                                    fontSize = 13.sp,
+                                )
+                            }
+                            Switch(checked = cashierHandsOut, onCheckedChange = {
+                                cashierHandsOut = it
+                                hub.setCashierHandsOut(it)
+                            })
+                        }
+                        HorizontalDivider()
                         Text("Cashier tablets find this kitchen automatically on the same Wi-Fi.")
                         Text("If they don't, enter this address in the cashier's settings:")
                         ips.forEach { Text("$it   (port $KITCHEN_PORT)", fontWeight = FontWeight.Bold, fontSize = 18.sp) }
