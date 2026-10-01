@@ -7,8 +7,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,6 +28,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -48,9 +47,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -73,7 +70,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -164,12 +164,12 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
                         val width = maxWidth
                         if (width >= 700.dp) {
                             Row(Modifier.fillMaxSize()) {
-                                MenuPane(menu, cartCounts, currency, onItemTap, Modifier.weight(1f).fillMaxHeight())
+                                MenuPane(menu, cartCounts, currency, onItemTap, onSettings, Modifier.weight(1f).fillMaxHeight())
                                 tray(Modifier.width(if (width >= 1000.dp) 420.dp else 360.dp).fillMaxHeight())
                             }
                         } else {
                             Column(Modifier.fillMaxSize()) {
-                                MenuPane(menu, cartCounts, currency, onItemTap, Modifier.weight(1.2f).fillMaxWidth())
+                                MenuPane(menu, cartCounts, currency, onItemTap, onSettings, Modifier.weight(1.2f).fillMaxWidth())
                                 tray(Modifier.weight(1f).fillMaxWidth())
                             }
                         }
@@ -260,6 +260,7 @@ private fun MenuPane(
     cartCounts: Map<String, Int>,
     currency: String,
     onTap: (MenuItem) -> Unit,
+    onAddFirst: () -> Unit,
     modifier: Modifier,
 ) {
     val categories = remember(menu) { listOf("All") + menu.map { it.category }.distinct() }
@@ -268,7 +269,7 @@ private fun MenuPane(
     val shown = if (selected == "All") menu else menu.filter { it.category == selected }
 
     Column(modifier) {
-        LazyRow(
+        if (menu.isNotEmpty()) LazyRow(
             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -282,10 +283,17 @@ private fun MenuPane(
         }
         if (menu.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text("No menu items yet. Add some in Settings → Menu.")
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Your menu is empty", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Add the food and drinks you sell, with a photo and price for each.")
+                    Spacer(Modifier.height(20.dp))
+                    Button(onClick = onAddFirst, modifier = Modifier.height(56.dp)) {
+                        Text("+ Add your first menu item", fontSize = 18.sp)
+                    }
+                }
             }
-        }
-        LazyVerticalGrid(
+        } else LazyVerticalGrid(
             columns = GridCells.Adaptive(170.dp),
             contentPadding = PaddingValues(12.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -537,72 +545,47 @@ fun NoteDialog(title: String, initial: String, onDismiss: () -> Unit, onSave: (S
     )
 }
 
-@OptIn(ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun SendOrderDialog(onDismiss: () -> Unit, onSend: (String) -> Unit) {
     val prefs = App.instance.prefs
-    var byTable by remember { mutableStateOf(true) }
-    var table by remember { mutableStateOf("") }
     var name by remember { mutableStateOf("") }
     var staff by remember { mutableStateOf(prefs.staffName) }
+    val focus = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focus.requestFocus() }
 
-    val origin = if (byTable) table.trim().takeIf { it.isNotEmpty() }?.let { "Table $it" } else name.trim().ifEmpty { null }
+    val origin = name.trim().ifEmpty { null }
+    val send = {
+        if (origin != null) {
+            prefs.staffName = staff
+            onSend(origin)
+        }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Who is this order for?", fontWeight = FontWeight.Bold) },
+        title = { Text("Customer name", fontWeight = FontWeight.Bold) },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState())) {
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    SegmentedButton(byTable, { byTable = true }, SegmentedButtonDefaults.itemShape(0, 2)) { Text("Table number") }
-                    SegmentedButton(!byTable, { byTable = false }, SegmentedButtonDefaults.itemShape(1, 2)) { Text("Customer name") }
-                }
-                Spacer(Modifier.height(12.dp))
-                if (byTable) {
-                    OutlinedTextField(
-                        value = table, onValueChange = { table = it.take(6) },
-                        label = { Text("Table") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        (1..20).forEach { n ->
-                            val on = table == "$n"
-                            Button(
-                                onClick = { table = "$n" },
-                                contentPadding = PaddingValues(0.dp),
-                                modifier = Modifier.size(52.dp),
-                                shape = RoundedCornerShape(10.dp),
-                                colors = if (on) ButtonDefaults.buttonColors()
-                                else ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                                    contentColor = MaterialTheme.colorScheme.onSurface,
-                                ),
-                            ) { Text("$n", fontSize = 18.sp) }
-                        }
-                    }
-                } else {
-                    OutlinedTextField(
-                        value = name, onValueChange = { name = it },
-                        label = { Text("Customer name") }, singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it.take(40) },
+                    placeholder = { Text("e.g. Maria") },
+                    singleLine = true,
+                    textStyle = LocalTextStyle.current.copy(fontSize = 24.sp),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words, imeAction = ImeAction.Send),
+                    keyboardActions = KeyboardActions(onSend = { send() }),
+                    modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = staff, onValueChange = { staff = it },
-                    label = { Text("Taken by (cashier)") }, singleLine = true,
+                    label = { Text("Taken by (cashier, optional)") }, singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
         },
         confirmButton = {
             Button(
-                onClick = {
-                    prefs.staffName = staff
-                    origin?.let(onSend)
-                },
+                onClick = send,
                 enabled = origin != null,
                 colors = ButtonDefaults.buttonColors(containerColor = SendGreen),
                 modifier = Modifier.height(56.dp),

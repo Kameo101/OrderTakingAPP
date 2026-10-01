@@ -1,6 +1,8 @@
 package com.ordertaking.app.ui
 
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -32,6 +34,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -47,12 +50,15 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -65,6 +71,10 @@ import com.ordertaking.app.data.MenuRepository
 import com.ordertaking.app.data.ModifierGroup
 import com.ordertaking.app.net.KITCHEN_PORT
 import com.ordertaking.app.net.LinkState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 @Composable
 fun CashierSettingsScreen(onBack: () -> Unit, onSwitchMode: () -> Unit) {
@@ -167,7 +177,7 @@ fun CashierSettingsScreen(onBack: () -> Unit, onSwitchMode: () -> Unit) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         SectionTitle("Menu (${menu.size} items)", Modifier.weight(1f))
                         Button(onClick = {
-                            editing = MenuItem(id = MenuRepository.newId(), name = "", category = menu.lastOrNull()?.category ?: "Mains")
+                            editing = MenuItem(id = MenuRepository.newId(), name = "", category = menu.lastOrNull()?.category ?: "Food")
                         }) {
                             Icon(Icons.Default.Add, null)
                             Spacer(Modifier.width(4.dp))
@@ -284,14 +294,45 @@ private fun MenuItemEditor(
     }
     var confirmDelete by remember { mutableStateOf(false) }
 
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var importing by remember { mutableStateOf(false) }
+    // A photo imported in this editor but not saved yet; deleted if replaced or cancelled.
+    fun setPhoto(path: String?) {
+        imagePath?.takeIf { it != initial.imagePath }?.let { File(it).delete() }
+        imagePath = path
+    }
+    fun import(uri: Uri) {
+        importing = true
+        scope.launch {
+            val path = withContext(Dispatchers.IO) { app.menu.importImage(uri) }
+            importing = false
+            if (path != null) setPhoto(path)
+            else Toast.makeText(context, "Couldn't use that photo", Toast.LENGTH_LONG).show()
+        }
+    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
-        if (uri != null) app.menu.importImage(uri)?.let { imagePath = it }
+        if (uri != null) import(uri)
+    }
+    var cameraUri by remember { mutableStateOf<Uri?>(null) }
+    val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
+        val uri = cameraUri
+        if (taken && uri != null) import(uri)
+    }
+    val hasCamera = remember { context.packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_ANY) }
+    val cancel = {
+        setPhoto(initial.imagePath)
+        onDismiss()
     }
 
     val parsedPrice = price.replace(',', '.').toDoubleOrNull()
     val valid = name.isNotBlank() && parsedPrice != null && parsedPrice >= 0
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(
+        onDismissRequest = cancel,
+        // Don't lose a half-made item to a stray tap outside the editor; Cancel or Back closes it.
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
+    ) {
         Surface(
             shape = RoundedCornerShape(16.dp),
             modifier = Modifier.widthIn(max = 760.dp).fillMaxWidth(0.95f).padding(vertical = 24.dp),
@@ -304,17 +345,30 @@ private fun MenuItemEditor(
                 ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            ItemImage(
-                                initial.copy(name = name.ifBlank { "?" }, imagePath = imagePath),
-                                Modifier.size(140.dp).clip(RoundedCornerShape(12.dp)),
-                            )
-                            TextButton(onClick = {
+                            Box(Modifier.size(160.dp), contentAlignment = Alignment.Center) {
+                                ItemImage(
+                                    initial.copy(name = name.ifBlank { "?" }, imagePath = imagePath),
+                                    Modifier.size(160.dp).clip(RoundedCornerShape(12.dp)),
+                                )
+                                if (importing) CircularProgressIndicator(color = Color.White)
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            OutlinedButton(onClick = {
                                 picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                            }) { Text(if (imagePath == null) "Add photo" else "Change photo") }
-                            if (imagePath != null) TextButton(onClick = { imagePath = null }) { Text("Remove photo") }
+                            }, enabled = !importing, modifier = Modifier.width(160.dp)) { Text("🖼 Choose photo") }
+                            if (hasCamera) {
+                                OutlinedButton(onClick = {
+                                    cameraUri = app.menu.newCameraUri().also { camera.launch(it) }
+                                }, enabled = !importing, modifier = Modifier.width(160.dp)) { Text("📷 Take photo") }
+                            }
+                            if (imagePath != null) TextButton(onClick = { setPhoto(null) }) { Text("Remove photo", color = LateRed) }
                         }
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                            OutlinedTextField(
+                                name, { name = it }, label = { Text("Name") }, singleLine = true,
+                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedTextField(
                                     price, { price = it }, label = { Text("Price") }, singleLine = true,
@@ -374,10 +428,10 @@ private fun MenuItemEditor(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (!isNew) TextButton(onClick = { confirmDelete = true }) { Text("Delete item", color = LateRed) }
                     Box(Modifier.weight(1f))
-                    TextButton(onClick = onDismiss) { Text("Cancel") }
+                    TextButton(onClick = cancel) { Text("Cancel") }
                     Spacer(Modifier.width(8.dp))
                     Button(
-                        enabled = valid,
+                        enabled = valid && !importing,
                         onClick = {
                             onSave(
                                 initial.copy(
@@ -405,7 +459,7 @@ private fun MenuItemEditor(
             onDismissRequest = { confirmDelete = false },
             title = { Text("Delete ${initial.name}?") },
             confirmButton = {
-                Button(onClick = onDelete, colors = ButtonDefaults.buttonColors(containerColor = LateRed)) { Text("Delete") }
+                Button(onClick = { setPhoto(initial.imagePath); onDelete() }, colors = ButtonDefaults.buttonColors(containerColor = LateRed)) { Text("Delete") }
             },
             dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel") } },
         )

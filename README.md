@@ -2,7 +2,7 @@
 
 Android app for counter ordering with a kitchen display. One APK, two modes:
 
-- **Cashier** — visual menu grid, tap to add to the order tray, pick options (cook temperature, extras), add notes, enter a table number or customer name, then **Send to Kitchen**.
+- **Cashier** — visual menu grid, tap to add to the order tray, pick options (cook temperature, extras), add notes, type the customer's name, then **Send to Kitchen**.
 - **Kitchen display** — incoming orders appear instantly as tickets (oldest on the left) with a timer, a sound alert, **START** (turns the ticket amber) and **DONE** (removes it and tells the cashier the order is ready). **Recall last** brings back a ticket bumped by mistake.
 
 - **📊 Sales** (on both screens) — order history and a sales report for Today / Yesterday / Last 7 days / Last 30 days / All time: number of orders, items sold, sales total, average order, best sellers (how many of each item sold and for how much), most-picked options, a day-by-day table, and every order with its items. **Export to spreadsheet** saves a CSV you can open in Excel or Google Sheets.
@@ -30,7 +30,7 @@ Order payload (`SUBMIT_ORDER` message):
 {
   "order_id": "ORD-3F9A1C22B0",
   "timestamp": "2026-10-01T08:40:00Z",
-  "origin": "Table 4",
+  "origin": "Maria",
   "items": [
     { "item_id": "101", "name": "Classic Cheeseburger", "quantity": 2, "modifiers": ["Medium rare"], "notes": "No onions", "price": 12.50 }
   ],
@@ -44,7 +44,16 @@ Order payload (`SUBMIT_ORDER` message):
 1. Install the APK on every tablet (allow "Install unknown apps" for your browser / file manager).
 2. Put all tablets on the same Wi-Fi.
 3. Open the app on the kitchen tablet → **Kitchen display**. On each counter tablet → **Cashier**.
-4. On a cashier tablet, open ⚙ Settings to edit the menu (photos, prices, categories, option groups, sold-out switch) and set the cashier name and currency.
+4. On a cashier tablet, tap **Add your first menu item** (or ⚙ Settings → Add item) and build your menu: name, price, category, a photo (choose one or take one with the tablet camera), optional option groups, and a sold-out switch. Set the cashier name and currency there too.
+
+### Using a phone hotspot (food truck / fair)
+
+Turn on the hotspot, connect every tablet to it, and open the app. Cashiers find the kitchen by:
+1. automatic discovery (mDNS),
+2. the address the kitchen was last seen at,
+3. if both fail, a quick scan of the hotspot network for the kitchen (about 2 seconds).
+
+The app doesn't use the internet, so it works with no mobile data — the hotspot just has to be switched on. Use a phone as the hotspot and connect all the tablets to it.
 
 Tips: keep the kitchen tablet plugged in (the app keeps the screen on), and give it a fixed IP (DHCP reservation in your router) if you use the manual address.
 

@@ -46,6 +46,11 @@ class AppPrefs(context: Context) {
         get() = sp.getString("kitchen_host", "") ?: ""
         set(v) = sp.edit().putString("kitchen_host", v.trim()).apply()
 
+    /** Last address the kitchen was reached at; tried first after a restart. */
+    var lastKitchenHost: String
+        get() = sp.getString("last_kitchen_host", "") ?: ""
+        set(v) = sp.edit().putString("last_kitchen_host", v).apply()
+
     /** Name of the cashier using this tablet; printed on tickets as "taken by". */
     var staffName: String
         get() = sp.getString("staff_name", "") ?: ""

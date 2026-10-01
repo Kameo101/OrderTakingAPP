@@ -71,6 +71,9 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
     private var loop: Job? = null
     @Volatile private var client: Client? = null
     @Volatile private var lastFlush = 0L
+    /** Addresses that just failed, and when they may be tried again. */
+    private val backoff = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    @Volatile private var lastScanAt = 0L
 
     @Synchronized
     fun start() {
@@ -123,8 +126,21 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
         outboxStore.save(emptyList())
     }
 
-    private fun connectOnce() {
-        val host = prefs.kitchenHost.ifBlank { null } ?: discoveredHost
+    /** Manual address if set; otherwise auto-discovered, then last known, then a scan of the network. */
+    private suspend fun pickHost(): String? {
+        prefs.kitchenHost.ifBlank { null }?.let { return it }
+        val now = System.currentTimeMillis()
+        listOfNotNull(discoveredHost, prefs.lastKitchenHost.ifBlank { null })
+            .firstOrNull { (backoff[it] ?: 0) < now }
+            ?.let { return it }
+        if (now - lastScanAt < 10_000) return null
+        _state.value = LinkState.Searching
+        lastScanAt = now
+        return scanForKitchen()
+    }
+
+    private suspend fun connectOnce() {
+        val host = pickHost()
         if (host == null) {
             _state.value = LinkState.Searching
             return
@@ -139,10 +155,13 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
         val ok = runCatching { c.connectBlocking(4, TimeUnit.SECONDS) }.getOrDefault(false)
         if (ok) {
             client = c
+            backoff.remove(host)
+            prefs.lastKitchenHost = host
             _state.value = LinkState.Connected(host)
             flush(c)
         } else {
             runCatching { c.close() }
+            backoff[host] = System.currentTimeMillis() + 15_000
             _state.value = LinkState.Offline(host)
         }
     }

@@ -1,7 +1,13 @@
 package com.ordertaking.app.data
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
 import android.net.Uri
+import android.util.Log
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,7 +19,7 @@ class MenuRepository(private val context: Context) {
     private val store = JsonFileStore(
         File(context.filesDir, "menu.json"),
         ListSerializer(MenuItem.serializer()),
-    ) { sampleMenu() }
+    ) { emptyList() }
 
     private val _items = MutableStateFlow(store.load())
     val items: StateFlow<List<MenuItem>> = _items.asStateFlow()
@@ -21,7 +27,14 @@ class MenuRepository(private val context: Context) {
     private val imageDir = File(context.filesDir, "images").apply { mkdirs() }
 
     init {
-        if (!store.exists()) store.save(_items.value)
+        if (!store.exists()) {
+            store.save(_items.value)
+        } else {
+            // Earlier versions shipped example items. Remove any that were never edited.
+            val examples = legacySampleMenu()
+            val cleaned = _items.value.filterNot { it in examples }
+            if (cleaned.size != _items.value.size) commit(cleaned)
+        }
     }
 
     @Synchronized
@@ -45,14 +58,50 @@ class MenuRepository(private val context: Context) {
         commit(_items.value.map { if (it.id == id) it.copy(available = available) else it })
     }
 
-    /** Copies a picked photo into private storage so it survives the gallery copy being deleted. */
+    /**
+     * Copies a photo into private storage (so it survives the original being deleted),
+     * shrunk to at most [MAX_IMAGE_SIDE] pixels and turned upright. Call off the main thread.
+     */
     fun importImage(uri: Uri): String? = runCatching {
-        val dest = File(imageDir, "${UUID.randomUUID()}.img")
-        context.contentResolver.openInputStream(uri)!!.use { input ->
-            dest.outputStream().use { input.copyTo(it) }
+        val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)!!.use { BitmapFactory.decodeStream(it, null, bounds) }
+        var sample = 1
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= MAX_IMAGE_SIDE) sample *= 2
+        var bitmap = resolver.openInputStream(uri)!!.use {
+            BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
+        }!!
+
+        val scale = MAX_IMAGE_SIDE.toFloat() / maxOf(bitmap.width, bitmap.height)
+        val rotation = runCatching {
+            resolver.openInputStream(uri)!!.use {
+                when (ExifInterface(it).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                    ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                    ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                    ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                    else -> 0f
+                }
+            }
+        }.getOrDefault(0f)
+        if (scale < 1f || rotation != 0f) {
+            val m = Matrix().apply {
+                if (scale < 1f) postScale(scale, scale)
+                postRotate(rotation)
+            }
+            bitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, m, true)
         }
+
+        val dest = File(imageDir, "${UUID.randomUUID()}.jpg")
+        dest.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 85, it) }
         dest.absolutePath
-    }.getOrNull()
+    }.onFailure { Log.e("MenuRepository", "Could not import image", it) }.getOrNull()
+
+    /** A temporary file the camera app can save a new photo into. */
+    fun newCameraUri(): Uri {
+        val dir = File(context.cacheDir, "camera").apply { mkdirs() }
+        val file = File(dir, "capture.jpg").apply { delete() }
+        return FileProvider.getUriForFile(context, "${context.packageName}.files", file)
+    }
 
     private fun commit(list: List<MenuItem>) {
         _items.value = list
@@ -62,7 +111,10 @@ class MenuRepository(private val context: Context) {
     companion object {
         fun newId(): String = UUID.randomUUID().toString().take(8)
 
-        fun sampleMenu(): List<MenuItem> = listOf(
+        private const val MAX_IMAGE_SIDE = 1200
+
+        /** Example items that version 1.0/1.1 put on new tablets; removed automatically if unedited. */
+        fun legacySampleMenu(): List<MenuItem> = listOf(
             MenuItem(
                 id = "101", name = "Classic Cheeseburger", price = 12.50, category = "Mains",
                 description = "Beef patty, cheddar, lettuce, tomato, house sauce on a brioche bun.",
