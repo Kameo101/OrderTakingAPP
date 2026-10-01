@@ -1,5 +1,6 @@
 package com.ordertaking.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -51,6 +52,7 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,6 +60,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,8 +86,9 @@ import coil.compose.AsyncImage
 import com.ordertaking.app.App
 import com.ordertaking.app.data.MenuItem
 import com.ordertaking.app.data.ModifierOption
-import com.ordertaking.app.data.TicketStatus
+import com.ordertaking.app.data.OrderStatusUpdate
 import com.ordertaking.app.net.LinkState
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -116,7 +120,15 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
         val cart by vm.cart.collectAsStateWithLifecycle()
         val linkState by vm.link.state.collectAsStateWithLifecycle()
         val outbox by vm.link.outbox.collectAsStateWithLifecycle()
+        val ready by vm.link.ready.collectAsStateWithLifecycle()
         val currency = app.prefs.currencySymbol
+        var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                now = System.currentTimeMillis()
+                delay(15_000)
+            }
+        }
 
         val snackbar = remember { SnackbarHostState() }
         val scope = rememberCoroutineScope()
@@ -127,23 +139,26 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
         LaunchedEffect(Unit) {
             vm.link.acks.collect { snackbar.showSnackbar("✓ Kitchen received ticket #${it.ticketNumber}") }
         }
-        LaunchedEffect(Unit) {
-            vm.link.statusUpdates.collect {
-                if (it.status == TicketStatus.DONE) {
-                    app.sounds.orderReady()
-                    snackbar.showSnackbar(
-                        "🔔 Ticket #${it.ticketNumber} · ${it.origin} is READY",
-                        actionLabel = "OK",
-                        duration = SnackbarDuration.Long,
-                    )
-                }
-            }
-        }
+        LaunchedEffect(Unit) { vm.link.readyArrivals.collect { app.sounds.orderReady() } }
 
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(Modifier.safeDrawingPadding()) {
                 Column(Modifier.fillMaxSize()) {
                     CashierTopBar(linkState, outbox.size, onSettings, onHistory)
+                    AnimatedVisibility(visible = ready.isNotEmpty()) {
+                        ReadyStrip(ready, now) { order ->
+                            vm.link.markServed(order)
+                            scope.launch {
+                                snackbar.currentSnackbarData?.dismiss()
+                                val result = snackbar.showSnackbar(
+                                    "${order.origin} — handed out",
+                                    actionLabel = "Undo",
+                                    duration = SnackbarDuration.Short,
+                                )
+                                if (result == SnackbarResult.ActionPerformed) vm.link.undoServed(order)
+                            }
+                        }
+                    }
                     BoxWithConstraints(Modifier.fillMaxSize()) {
                         val cartCounts = cart.groupBy { it.item.id }.mapValues { e -> e.value.sumOf { it.quantity } }
                         val onItemTap: (MenuItem) -> Unit = { item ->
@@ -220,6 +235,64 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
                     }
                 },
             )
+        }
+    }
+}
+
+/** Orders the kitchen has finished, shown until a cashier hands them out. Hidden when empty. */
+@Composable
+private fun ReadyStrip(ready: List<OrderStatusUpdate>, now: Long, onHandedOut: (OrderStatusUpdate) -> Unit) {
+    Surface(color = Color(0xFFE8F5E9), modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(top = 8.dp)) {
+            Text(
+                "🔔 Ready for pickup (${ready.size}) — call the name and hand it over",
+                fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1B5E20),
+                modifier = Modifier.padding(horizontal = 12.dp),
+            )
+            LazyRow(
+                contentPadding = PaddingValues(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(ready, key = { it.orderId }) { order -> ReadyCard(order, now) { onHandedOut(order) } }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReadyCard(order: OrderStatusUpdate, now: Long, onHandedOut: () -> Unit) {
+    val minutes = if (order.readyAtMillis > 0) ((now - order.readyAtMillis) / 60_000).coerceAtLeast(0) else 0
+    Card(
+        modifier = Modifier.width(250.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(2.dp, if (minutes >= 10) CookingAmber else SendGreen),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    order.origin, fontSize = 24.sp, fontWeight = FontWeight.Bold,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
+                if (order.ticketNumber > 0) Text("#${order.ticketNumber}", fontSize = 15.sp, color = Color.Gray)
+            }
+            Text(
+                order.items.joinToString(" · ") { "${it.quantity}× ${it.name}" }.ifEmpty { "—" },
+                fontSize = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.height(40.dp),
+            )
+            Text(
+                if (minutes < 1) "Ready just now" else "Waiting $minutes min",
+                fontSize = 12.sp,
+                color = if (minutes >= 10) Color(0xFFE65100) else Color.Gray,
+                fontWeight = if (minutes >= 10) FontWeight.Bold else FontWeight.Normal,
+            )
+            Spacer(Modifier.height(6.dp))
+            Button(
+                onClick = onHandedOut,
+                colors = ButtonDefaults.buttonColors(containerColor = SendGreen, contentColor = Color.White),
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+            ) { Text("✓ Handed out", fontSize = 17.sp, fontWeight = FontWeight.Bold) }
         }
     }
 }

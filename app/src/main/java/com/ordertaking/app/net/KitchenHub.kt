@@ -12,6 +12,8 @@ import com.ordertaking.app.data.JsonFileStore
 import com.ordertaking.app.data.KitchenTicket
 import com.ordertaking.app.data.Order
 import com.ordertaking.app.data.OrderStatusUpdate
+import com.ordertaking.app.data.ReadyList
+import com.ordertaking.app.data.SetStatus
 import com.ordertaking.app.data.SubmitOrder
 import com.ordertaking.app.data.TicketStatus
 import com.ordertaking.app.data.WireMessage
@@ -58,6 +60,10 @@ class KitchenHub(
     val newTickets: SharedFlow<KitchenTicket> = _newTickets.asSharedFlow()
 
     private val advertiser = KitchenAdvertiser(context)
+
+    init {
+        prefs.readyTrackingSince // record the moment pickups started being tracked
+    }
     private var server: Server? = null
 
     @Synchronized
@@ -84,24 +90,53 @@ class KitchenHub(
         update { list ->
             list.map {
                 if (it.order.orderId == orderId) {
+                    val finished = status == TicketStatus.DONE || status == TicketStatus.SERVED
                     it.copy(
                         status = status,
-                        bumpedAtMillis = if (status == TicketStatus.DONE) System.currentTimeMillis() else null,
+                        // Keep the original "ready" time when moving between DONE and SERVED (e.g. an undo).
+                        bumpedAtMillis = if (!finished) null else it.bumpedAtMillis.takeIf { _ -> it.isFinished } ?: System.currentTimeMillis(),
                     ).also { t -> changed = t }
                 } else it
             }
         }
-        changed?.let { broadcastStatus(it) }
+        changed?.let { broadcast(it.toStatusUpdate()) }
     }
 
     /** Brings the most recently bumped ticket back onto the screen. */
     fun recallLast() {
-        val last = _tickets.value.filter { it.status == TicketStatus.DONE }
+        val last = _tickets.value.filter { it.isFinished }
             .maxByOrNull { it.bumpedAtMillis ?: 0 } ?: return
         setStatus(last.order.orderId, TicketStatus.IN_PROGRESS)
     }
 
-    fun clearAll() = update { emptyList() }
+    fun clearAll() {
+        update { emptyList() }
+        broadcast(ReadyList(emptyList()))
+    }
+
+    /** Orders cooked and waiting for pickup (ignoring any older than 12 hours). */
+    private fun readyList(): ReadyList {
+        val cutoff = maxOf(System.currentTimeMillis() - 12 * 60 * 60 * 1000L, prefs.readyTrackingSince)
+        return ReadyList(
+            _tickets.value.filter { it.status == TicketStatus.DONE && (it.bumpedAtMillis ?: 0) > cutoff }
+                .sortedBy { it.bumpedAtMillis }
+                .map { it.toStatusUpdate() },
+        )
+    }
+
+    /** A cashier handed an order out (SERVED) or undid that (DONE). */
+    private fun onCashierStatus(msg: SetStatus) {
+        val ticket = _tickets.value.find { it.order.orderId == msg.orderId }
+        when {
+            ticket == null && msg.status == TicketStatus.SERVED ->
+                // Ticket already cleared from the kitchen; still tell every cashier it's gone.
+                broadcast(OrderStatusUpdate(msg.orderId, 0, "", TicketStatus.SERVED))
+            ticket == null -> Unit
+            msg.status == TicketStatus.SERVED && ticket.status == TicketStatus.DONE -> setStatus(msg.orderId, TicketStatus.SERVED)
+            msg.status == TicketStatus.DONE && ticket.status == TicketStatus.SERVED -> setStatus(msg.orderId, TicketStatus.DONE)
+            else -> broadcast(ticket.toStatusUpdate()) // nothing to change; resync the cashiers
+        }
+    }
 
     private fun receive(order: Order): KitchenTicket {
         synchronized(this) {
@@ -122,17 +157,21 @@ class KitchenHub(
     private fun update(transform: (List<KitchenTicket>) -> List<KitchenTicket>) {
         val next = transform(_tickets.value)
         // Keep every open ticket, but only the 100 most recent finished ones (for recall).
-        val done = next.filter { it.status == TicketStatus.DONE }
+        val done = next.filter { it.isFinished }
             .sortedByDescending { it.bumpedAtMillis ?: 0 }.drop(100).map { it.order.orderId }.toSet()
         val pruned = if (done.isEmpty()) next else next.filterNot { it.order.orderId in done }
         _tickets.value = pruned
         store.save(pruned)
     }
 
-    private fun broadcastStatus(t: KitchenTicket) {
-        val msg = OrderStatusUpdate(t.order.orderId, t.ticketNumber, t.order.origin, t.status)
+    private fun broadcast(msg: WireMessage) {
         runCatching { server?.broadcast(encode(msg)) }
     }
+
+    private val KitchenTicket.isFinished get() = status == TicketStatus.DONE || status == TicketStatus.SERVED
+
+    private fun KitchenTicket.toStatusUpdate() =
+        OrderStatusUpdate(order.orderId, ticketNumber, order.origin, status, order.items, bumpedAtMillis ?: 0)
 
     private fun encode(msg: WireMessage) = AppJson.encodeToString(WireMessage.serializer(), msg)
 
@@ -147,6 +186,8 @@ class KitchenHub(
         override fun onOpen(conn: WebSocket, handshake: ClientHandshake) {
             clients.add(conn)
             _connectedTablets.value = clients.size
+            // Catch the cashier up on anything that became ready while it was away.
+            runCatching { conn.send(encode(readyList())) }
         }
 
         override fun onClose(conn: WebSocket, code: Int, reason: String?, remote: Boolean) {
@@ -161,6 +202,7 @@ class KitchenHub(
                         val ticket = receive(msg.order)
                         conn.send(encode(Ack(msg.order.orderId, ticket.ticketNumber)))
                     }
+                    is SetStatus -> onCashierStatus(msg)
                     else -> Unit
                 }
             } catch (e: Exception) {

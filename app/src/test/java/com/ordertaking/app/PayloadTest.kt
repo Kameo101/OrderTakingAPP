@@ -6,7 +6,11 @@ import com.ordertaking.app.data.MenuRepository
 import com.ordertaking.app.data.ModifierOption
 import com.ordertaking.app.data.Order
 import com.ordertaking.app.data.OrderItem
+import com.ordertaking.app.data.OrderStatusUpdate
+import com.ordertaking.app.data.ReadyList
+import com.ordertaking.app.data.SetStatus
 import com.ordertaking.app.data.SubmitOrder
+import com.ordertaking.app.data.TicketStatus
 import com.ordertaking.app.data.WireMessage
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -57,6 +61,31 @@ class PayloadTest {
 
         val ack: WireMessage = Ack("ORD-1", 7)
         assertEquals(ack, AppJson.decodeFromString(WireMessage.serializer(), AppJson.encodeToString(WireMessage.serializer(), ack)))
+    }
+
+    @Test
+    fun readyAndServedMessagesRoundTrip() {
+        val ready = OrderStatusUpdate("ORD-1", 12, "Maria", TicketStatus.DONE, order.items, 1_700_000_000_000)
+        val messages: List<WireMessage> = listOf(
+            ready,
+            ReadyList(listOf(ready)),
+            SetStatus("ORD-1", TicketStatus.SERVED),
+        )
+        for (m in messages) {
+            val text = AppJson.encodeToString(WireMessage.serializer(), m)
+            assertEquals(m, AppJson.decodeFromString(WireMessage.serializer(), text))
+        }
+        val json = AppJson.parseToJsonElement(AppJson.encodeToString(WireMessage.serializer(), messages[2])).jsonObject
+        assertEquals("SET_STATUS", json["type"]!!.jsonPrimitive.content)
+        assertEquals("SERVED", json["status"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun statusUpdateFromOlderKitchenStillDecodes() {
+        val old = """{"type":"ORDER_STATUS","order_id":"ORD-1","ticket_number":3,"origin":"Table 4","status":"DONE"}"""
+        val msg = AppJson.decodeFromString(WireMessage.serializer(), old) as OrderStatusUpdate
+        assertEquals(emptyList<OrderItem>(), msg.items)
+        assertEquals(0L, msg.readyAtMillis)
     }
 
     @Test

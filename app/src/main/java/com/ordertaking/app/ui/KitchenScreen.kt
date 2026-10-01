@@ -88,8 +88,9 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
         }
     }
 
-    val active = tickets.filter { it.status != TicketStatus.DONE }.sortedBy { it.receivedAtMillis }
-    val hasDone = tickets.any { it.status == TicketStatus.DONE }
+    val active = tickets.filter { it.status == TicketStatus.PENDING || it.status == TicketStatus.IN_PROGRESS }
+        .sortedBy { it.receivedAtMillis }
+    val hasDone = tickets.any { it.status == TicketStatus.DONE || it.status == TicketStatus.SERVED }
 
     if (showHistory) {
         HistoryScreen(dark = true, scopeNote = "Every order received by this kitchen", onBack = { showHistory = false })

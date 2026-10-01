@@ -75,7 +75,14 @@ data class Order(
 // ---------------------------------------------------------------------------
 
 @Serializable
-enum class TicketStatus { PENDING, IN_PROGRESS, DONE }
+enum class TicketStatus {
+    PENDING,
+    IN_PROGRESS,
+    /** Cooked and waiting at the counter for the customer. */
+    DONE,
+    /** Handed to the customer by a cashier. */
+    SERVED,
+}
 
 @Serializable
 data class KitchenTicket(
@@ -107,12 +114,29 @@ data class Ack(
     @SerialName("ticket_number") val ticketNumber: Int,
 ) : WireMessage()
 
-/** Kitchen -> all cashiers. Sent when a ticket changes state (e.g. bumped = ready). */
+/** Kitchen -> all cashiers. Sent when a ticket changes state (DONE = ready for pickup, SERVED = handed out). */
 @Serializable
 @SerialName("ORDER_STATUS")
 data class OrderStatusUpdate(
     @SerialName("order_id") val orderId: String,
     @SerialName("ticket_number") val ticketNumber: Int,
     val origin: String,
+    val status: TicketStatus,
+    /** What to hand over, so any cashier tablet can show it. */
+    val items: List<OrderItem> = emptyList(),
+    /** When the kitchen marked it ready. */
+    @SerialName("ready_at") val readyAtMillis: Long = 0,
+) : WireMessage()
+
+/** Kitchen -> a cashier that just connected: every order currently waiting for pickup. */
+@Serializable
+@SerialName("READY_LIST")
+data class ReadyList(val orders: List<OrderStatusUpdate>) : WireMessage()
+
+/** Cashier -> kitchen: an order was handed out (SERVED), or that was undone (DONE). */
+@Serializable
+@SerialName("SET_STATUS")
+data class SetStatus(
+    @SerialName("order_id") val orderId: String,
     val status: TicketStatus,
 ) : WireMessage()

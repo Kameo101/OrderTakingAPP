@@ -60,6 +60,14 @@ class AppPrefs(context: Context) {
         get() = sp.getString("currency", "$") ?: "$"
         set(v) = sp.edit().putString("currency", v).apply()
 
+    /**
+     * When this kitchen started tracking pickups (version 1.4). Orders finished before that
+     * were already handed out the old way, so they never show as "ready for pickup".
+     */
+    val readyTrackingSince: Long
+        @Synchronized get() = sp.getLong("ready_since", 0).takeIf { it > 0 }
+            ?: System.currentTimeMillis().also { sp.edit().putLong("ready_since", it).apply() }
+
     /** Ticket numbers restart at 1 every day. */
     @Synchronized
     fun nextTicketNumber(): Int {

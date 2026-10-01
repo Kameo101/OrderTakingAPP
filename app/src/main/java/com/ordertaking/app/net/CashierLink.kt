@@ -10,6 +10,9 @@ import com.ordertaking.app.data.OrderHistory
 import com.ordertaking.app.data.JsonFileStore
 import com.ordertaking.app.data.Order
 import com.ordertaking.app.data.OrderStatusUpdate
+import com.ordertaking.app.data.ReadyList
+import com.ordertaking.app.data.SetStatus
+import com.ordertaking.app.data.TicketStatus
 import com.ordertaking.app.data.SubmitOrder
 import com.ordertaking.app.data.WireMessage
 import kotlinx.coroutines.CoroutineScope
@@ -61,8 +64,21 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
     private val _acks = MutableSharedFlow<Ack>(extraBufferCapacity = 32)
     val acks: SharedFlow<Ack> = _acks.asSharedFlow()
 
-    private val _statusUpdates = MutableSharedFlow<OrderStatusUpdate>(extraBufferCapacity = 32)
-    val statusUpdates: SharedFlow<OrderStatusUpdate> = _statusUpdates.asSharedFlow()
+    // Orders the kitchen has finished, waiting to be handed to the customer. Saved so they
+    // survive the app closing; the kitchen re-sends the full list whenever we reconnect.
+    private val readyStore = JsonFileStore(
+        File(context.filesDir, "ready.json"),
+        ListSerializer(OrderStatusUpdate.serializer()),
+    ) { emptyList() }
+    private val _ready = MutableStateFlow(readyStore.load())
+    val ready: StateFlow<List<OrderStatusUpdate>> = _ready.asStateFlow()
+
+    /** Fires when an order newly becomes ready (for the chime). */
+    private val _readyArrivals = MutableSharedFlow<OrderStatusUpdate>(extraBufferCapacity = 32)
+    val readyArrivals: SharedFlow<OrderStatusUpdate> = _readyArrivals.asSharedFlow()
+
+    /** Handed out on this tablet but not yet confirmed by the kitchen; re-sent on reconnect. */
+    private val servedPending = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     @Volatile private var discoveredHost: String? = null
     private val finder = KitchenFinder(context) { discoveredHost = it }
@@ -84,7 +100,7 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
                 val c = client
                 if (c == null || !c.isOpen) {
                     connectOnce()
-                } else if (_outbox.value.isNotEmpty() && System.currentTimeMillis() - lastFlush > 5_000) {
+                } else if ((_outbox.value.isNotEmpty() || servedPending.isNotEmpty()) && System.currentTimeMillis() - lastFlush > 5_000) {
                     flush(c) // No ack yet: resend. The kitchen ignores duplicates.
                 }
                 delay(2_000)
@@ -119,6 +135,55 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
             outboxStore.save(next)
         }
         client?.takeIf { it.isOpen }?.let { c -> scope.launch { flush(c) } }
+    }
+
+    /** The order was handed to the customer: clear it here and on every other tablet. */
+    fun markServed(order: OrderStatusUpdate) {
+        servedPending.add(order.orderId)
+        setReady(_ready.value.filterNot { it.orderId == order.orderId })
+        sendStatus(order.orderId, TicketStatus.SERVED)
+    }
+
+    /** Undo an accidental "handed out". */
+    fun undoServed(order: OrderStatusUpdate) {
+        servedPending.remove(order.orderId)
+        setReady(_ready.value.filterNot { it.orderId == order.orderId } + order)
+        sendStatus(order.orderId, TicketStatus.DONE)
+    }
+
+    private fun sendStatus(orderId: String, status: TicketStatus) {
+        client?.takeIf { it.isOpen }?.let { c ->
+            runCatching { c.send(AppJson.encodeToString(WireMessage.serializer(), SetStatus(orderId, status))) }
+        }
+    }
+
+    private fun onStatus(u: OrderStatusUpdate) = synchronized(_ready) {
+        val others = _ready.value.filterNot { it.orderId == u.orderId }
+        when (u.status) {
+            TicketStatus.DONE -> if (u.orderId !in servedPending) {
+                val isNew = others.size == _ready.value.size
+                setReady(others + u)
+                if (isNew) _readyArrivals.tryEmit(u)
+            }
+            TicketStatus.SERVED -> {
+                servedPending.remove(u.orderId)
+                setReady(others)
+            }
+            else -> setReady(others) // the kitchen recalled it to keep cooking
+        }
+    }
+
+    private fun onReadyList(list: ReadyList) = synchronized(_ready) {
+        val known = _ready.value.map { it.orderId }.toSet()
+        val next = list.orders.filter { it.orderId !in servedPending }
+        setReady(next)
+        next.lastOrNull { it.orderId !in known }?.let { _readyArrivals.tryEmit(it) }
+    }
+
+    private fun setReady(list: List<OrderStatusUpdate>) {
+        val sorted = list.sortedBy { it.readyAtMillis }
+        _ready.value = sorted
+        readyStore.save(sorted)
     }
 
     fun discardOutbox() = synchronized(this) {
@@ -168,6 +233,9 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
 
     private fun flush(c: Client) {
         lastFlush = System.currentTimeMillis()
+        for (id in servedPending) {
+            runCatching { c.send(AppJson.encodeToString(WireMessage.serializer(), SetStatus(id, TicketStatus.SERVED))) }
+        }
         for (order in _outbox.value) {
             runCatching { c.send(AppJson.encodeToString(WireMessage.serializer(), SubmitOrder(order))) }
                 .onFailure { Log.w("CashierLink", "send failed", it); return }
@@ -194,7 +262,8 @@ class CashierLink(context: Context, private val prefs: AppPrefs, private val his
             try {
                 when (val msg = AppJson.decodeFromString(WireMessage.serializer(), message)) {
                     is Ack -> onAck(msg)
-                    is OrderStatusUpdate -> _statusUpdates.tryEmit(msg)
+                    is OrderStatusUpdate -> onStatus(msg)
+                    is ReadyList -> onReadyList(msg)
                     else -> Unit
                 }
             } catch (e: Exception) {
