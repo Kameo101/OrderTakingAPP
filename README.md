@@ -3,9 +3,9 @@
 Android app for counter ordering with a kitchen display. One APK, two modes:
 
 - **Cashier** — visual menu grid, tap to add to the order tray, pick options (cook temperature, extras), add notes, type the customer's name, then **Send to Kitchen**.
-- **Kitchen display** — incoming orders appear instantly as tickets (oldest on the left) with a timer, a sound alert, **START** (turns the ticket amber) and **DONE** (removes it and tells the cashier the order is ready). **Recall last** brings back a ticket bumped by mistake.
+- **Kitchen display** — incoming orders appear instantly as tickets (oldest on the left) with a timer, a bell chime (on the media volume; the screen warns if the volume is off), **START** (turns the ticket amber) and **DONE** (removes it and tells the cashier the order is ready). **Recall last** brings back a ticket bumped by mistake.
 
-- **📊 Sales** (on both screens) — order history and a sales report for Today / Yesterday / Last 7 days / Last 30 days / All time: number of orders, items sold, sales total, average order, best sellers (how many of each item sold and for how much), most-picked options, a day-by-day table, and every order with its items. **Export to spreadsheet** saves a CSV you can open in Excel or Google Sheets.
+- **📊 Sales** (on both screens) — order history and a sales report for Today / Yesterday / Last 7 days / Last 30 days / All time: number of orders, items sold, sales total, average order, best sellers (how many of each item sold and for how much), most-picked options, a day-by-day table, and every order with its items. **Export to spreadsheet** saves a CSV you can open in Excel or Google Sheets. Press and hold an order to delete it (two confirmations) if it was entered by mistake; deleting only affects that tablet's history.
 
 There is no payment step, no cloud service and no account to create.
 

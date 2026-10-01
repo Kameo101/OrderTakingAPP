@@ -76,16 +76,17 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
     var showSettings by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
     var ips by remember { mutableStateOf(localIpAddresses()) }
+    var muted by remember { mutableStateOf(app.sounds.isMuted()) }
 
     LaunchedEffect(Unit) {
         var tick = 0
         while (true) {
             now = System.currentTimeMillis()
+            if (tick % 2 == 0) muted = app.sounds.isMuted()
             if (tick++ % 15 == 0) ips = localIpAddresses() // Wi-Fi may reconnect with a new address
             delay(1000)
         }
     }
-    LaunchedEffect(Unit) { hub.newTickets.collect { app.chime() } }
 
     val active = tickets.filter { it.status != TicketStatus.DONE }.sortedBy { it.receivedAtMillis }
     val hasDone = tickets.any { it.status == TicketStatus.DONE }
@@ -111,6 +112,12 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                             fontSize = 14.sp,
                             color = if (error != null) Color(0xFFFF8A80) else Color(0xFFB0BEC5),
                         )
+                        if (muted) {
+                            Text(
+                                "🔇 Volume is off — you won't hear new orders. Turn up the volume.",
+                                fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD740),
+                            )
+                        }
                     }
                     if (error != null) {
                         Button(onClick = { hub.start() }) { Text("Retry") }
@@ -174,7 +181,8 @@ fun KitchenScreen(onSwitchMode: () -> Unit) {
                             onValueChange = { currency = it.take(4); app.prefs.currencySymbol = currency.ifBlank { "$" } },
                             label = { Text("Currency for sales reports") }, singleLine = true,
                         )
-                        OutlinedButton(onClick = { app.chime() }) { Text("Test sound") }
+                        Text("New orders play a chime on the tablet's media volume — use the volume buttons to set it.")
+                        OutlinedButton(onClick = { app.sounds.newOrder() }) { Text("🔔 Test sound") }
                         OutlinedButton(onClick = { confirmClear = true }) { Text("Clear all tickets…") }
                         OutlinedButton(onClick = onSwitchMode) { Text("Change what this tablet is used for…") }
                     }

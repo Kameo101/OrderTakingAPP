@@ -4,8 +4,9 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,7 +29,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -37,6 +40,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -49,7 +53,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -86,6 +92,9 @@ fun HistoryScreen(dark: Boolean, scopeNote: String, onBack: () -> Unit) {
         value = withContext(Dispatchers.IO) { app.history.loadAll() }
     }
     val entries = remember(all, period) { all?.let { Sales.filter(it, period) } ?: emptyList() }
+    // Deleting a mistaken order: step 1 asks, step 2 confirms.
+    var deleting by remember { mutableStateOf<HistoryEntry?>(null) }
+    var deleteConfirmed by remember { mutableStateOf(false) }
     val summary = remember(entries) { Sales.summarize(entries) }
 
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
@@ -147,19 +156,85 @@ fun HistoryScreen(dark: Boolean, scopeNote: String, onBack: () -> Unit) {
                                     summarySections(summary, currency, showDays = period != SalesPeriod.TODAY && period != SalesPeriod.YESTERDAY)
                                 }
                                 LazyColumn(Modifier.weight(1f).fillMaxHeight(), contentPadding = pad) {
-                                    orderSection(entries, currency)
+                                    orderSection(entries, currency) { deleting = it }
                                 }
                             }
                         } else {
                             LazyColumn(Modifier.fillMaxSize(), contentPadding = pad) {
                                 summarySections(summary, currency, showDays = period != SalesPeriod.TODAY && period != SalesPeriod.YESTERDAY)
-                                orderSection(entries, currency)
+                                orderSection(entries, currency) { deleting = it }
                             }
                         }
                     }
                 }
             }
         }
+
+        deleting?.let { entry ->
+            DeleteOrderDialogs(
+                entry = entry,
+                confirmed = deleteConfirmed,
+                currency = currency,
+                onFirstYes = { deleteConfirmed = true },
+                onCancel = { deleting = null; deleteConfirmed = false },
+                onDelete = {
+                    deleting = null
+                    deleteConfirmed = false
+                    scope.launch {
+                        val ok = withContext(Dispatchers.IO) { app.history.delete(entry.order.orderId) }
+                        Toast.makeText(context, if (ok) "Order deleted" else "Couldn't delete the order", Toast.LENGTH_SHORT).show()
+                        reloadKey++
+                    }
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun DeleteOrderDialogs(
+    entry: HistoryEntry,
+    confirmed: Boolean,
+    currency: String,
+    onFirstYes: () -> Unit,
+    onDelete: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val label = (if (entry.ticketNumber > 0) "Ticket #${entry.ticketNumber} · " else "") + entry.order.origin
+    val details = SimpleDateFormat("EEE d MMM, HH:mm", Locale.getDefault()).format(Date(entry.recordedAtMillis)) +
+        " · " + money(entry.order.items.sumOf { it.price * it.quantity }, currency)
+    if (!confirmed) {
+        AlertDialog(
+            onDismissRequest = onCancel,
+            title = { Text("Delete this order?") },
+            text = {
+                Column {
+                    Text(label, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Text(details)
+                    Spacer(Modifier.height(6.dp))
+                    entry.order.items.forEach { Text("${it.quantity}× ${it.name}") }
+                }
+            },
+            confirmButton = { Button(onClick = onFirstYes) { Text("Delete order") } },
+            dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
+        )
+    } else {
+        AlertDialog(
+            onDismissRequest = onCancel,
+            title = { Text("Are you sure you want to delete this order from the history?") },
+            text = {
+                Text(
+                    "$label ($details) will be removed and no longer counted in your sales. " +
+                        "This can't be undone.\n\nThis only changes the history on this tablet.",
+                )
+            },
+            confirmButton = {
+                Button(onClick = onDelete, colors = ButtonDefaults.buttonColors(containerColor = LateRed, contentColor = Color.White)) {
+                    Text("Yes, delete it")
+                }
+            },
+            dismissButton = { TextButton(onClick = onCancel) { Text("No, keep it") } },
+        )
     }
 }
 
@@ -208,9 +283,16 @@ private fun LazyListScope.summarySections(s: SalesSummary, currency: String, sho
     }
 }
 
-private fun LazyListScope.orderSection(entries: List<HistoryEntry>, currency: String) {
+private fun LazyListScope.orderSection(entries: List<HistoryEntry>, currency: String, onLongPress: (HistoryEntry) -> Unit) {
     sectionHeader("Orders (${entries.size}) — newest first")
-    items(entries.asReversed(), key = { it.order.orderId }) { OrderRow(it, currency) }
+    item {
+        Text(
+            "Tap an order to see its items. Press and hold to delete a mistaken order.",
+            fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+    }
+    items(entries.asReversed(), key = { it.order.orderId }) { OrderRow(it, currency) { onLongPress(it) } }
 }
 
 @Composable
@@ -235,14 +317,22 @@ private fun TableRow(rank: String, name: String, qty: String, amount: String, he
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun OrderRow(e: HistoryEntry, currency: String) {
+private fun OrderRow(e: HistoryEntry, currency: String, onLongPress: () -> Unit) {
     var open by remember { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
     val total = e.order.items.sumOf { it.price * it.quantity }
     Surface(
         shape = RoundedCornerShape(10.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { open = !open },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).combinedClickable(
+            onClick = { open = !open },
+            onLongClick = {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                onLongPress()
+            },
+        ),
     ) {
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {

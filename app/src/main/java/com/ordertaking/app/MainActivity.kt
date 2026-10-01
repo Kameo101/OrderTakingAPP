@@ -1,5 +1,6 @@
 package com.ordertaking.app
 
+import android.media.AudioManager
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -20,6 +21,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // Both screens sit on a counter all day; never let them go to sleep.
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Volume buttons control the app's sounds (media volume) while it's open.
+        volumeControlStream = AudioManager.STREAM_MUSIC
         val app = App.instance
         setContent {
             var mode by remember { mutableStateOf(app.prefs.mode) }

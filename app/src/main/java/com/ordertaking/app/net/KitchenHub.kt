@@ -2,6 +2,7 @@ package com.ordertaking.app.net
 
 import android.content.Context
 import android.util.Log
+import com.ordertaking.app.Sounds
 import com.ordertaking.app.data.Ack
 import com.ordertaking.app.data.AppJson
 import com.ordertaking.app.data.AppPrefs
@@ -33,7 +34,12 @@ import java.util.Collections
  * keeps the ticket list (persisted, so a restart doesn't lose orders) and pushes
  * "ready" notices back to the cashiers when a ticket is bumped.
  */
-class KitchenHub(context: Context, private val prefs: AppPrefs, private val history: OrderHistory) {
+class KitchenHub(
+    context: Context,
+    private val prefs: AppPrefs,
+    private val history: OrderHistory,
+    private val sounds: Sounds,
+) {
     private val store = JsonFileStore(
         File(context.filesDir, "kitchen_tickets.json"),
         ListSerializer(KitchenTicket.serializer()),
@@ -106,6 +112,8 @@ class KitchenHub(context: Context, private val prefs: AppPrefs, private val hist
                 .onFailure { Log.e("KitchenHub", "Could not save order to history", it) }
             update { it + ticket }
             _newTickets.tryEmit(ticket)
+            // Played here rather than by the screen, so it sounds whatever the kitchen is showing.
+            sounds.newOrder()
             return ticket
         }
     }

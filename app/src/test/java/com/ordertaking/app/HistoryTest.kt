@@ -7,6 +7,7 @@ import com.ordertaking.app.data.OrderItem
 import com.ordertaking.app.data.Sales
 import com.ordertaking.app.data.SalesPeriod
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -36,6 +37,24 @@ class HistoryTest {
         val loaded = OrderHistory(f).loadAll()
         assertEquals(listOf("A", "B"), loaded.map { it.order.orderId })
         assertEquals(burger, loaded[0].order.items[0])
+    }
+
+    @Test
+    fun deleteRemovesOnlyThatOrderAndSurvivesReload() {
+        val f = File.createTempFile("history", ".jsonl").apply { deleteOnExit() }
+        val h = OrderHistory(f)
+        h.append(entry("A", "2026-10-01", burger))
+        h.append(entry("B", "2026-10-01", fries))
+        h.append(entry("C", "2026-10-01", fries))
+
+        assertTrue(h.delete("B"))
+        assertEquals(listOf("A", "C"), OrderHistory(f).loadAll().map { it.order.orderId })
+        assertFalse(h.delete("B")) // already gone
+        assertFalse(h.delete("nope"))
+
+        h.append(entry("D", "2026-10-01", burger)) // appending still works after a delete
+        assertEquals(listOf("A", "C", "D"), OrderHistory(f).loadAll().map { it.order.orderId })
+        assertEquals(13.5 * 2 + 6.0 + 13.5 * 2, Sales.summarize(h.loadAll(), utc).revenue, 0.001)
     }
 
     @Test

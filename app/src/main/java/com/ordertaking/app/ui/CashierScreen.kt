@@ -130,7 +130,7 @@ private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit, onHistory:
         LaunchedEffect(Unit) {
             vm.link.statusUpdates.collect {
                 if (it.status == TicketStatus.DONE) {
-                    app.chime()
+                    app.sounds.orderReady()
                     snackbar.showSnackbar(
                         "🔔 Ticket #${it.ticketNumber} · ${it.origin} is READY",
                         actionLabel = "OK",
