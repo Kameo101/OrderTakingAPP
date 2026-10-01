@@ -1,0 +1,605 @@
+package com.ordertaking.app.ui
+
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
+import com.ordertaking.app.App
+import com.ordertaking.app.data.MenuItem
+import com.ordertaking.app.data.ModifierOption
+import com.ordertaking.app.data.TicketStatus
+import com.ordertaking.app.net.LinkState
+import kotlinx.coroutines.launch
+import java.io.File
+
+@Composable
+fun CashierScreen(onSwitchMode: () -> Unit, vm: CashierViewModel = viewModel()) {
+    val app = App.instance
+    LaunchedEffect(Unit) { app.cashierLink.start() }
+
+    var showSettings by remember { mutableStateOf(false) }
+    AppTheme {
+        if (showSettings) {
+            CashierSettingsScreen(onBack = { showSettings = false }, onSwitchMode = onSwitchMode)
+        } else {
+            CashierMain(vm) { showSettings = true }
+        }
+    }
+}
+
+@Composable
+private fun CashierMain(vm: CashierViewModel, onSettings: () -> Unit) {
+    val app = App.instance
+    run {
+        val menu by vm.menu.collectAsStateWithLifecycle()
+        val cart by vm.cart.collectAsStateWithLifecycle()
+        val linkState by vm.link.state.collectAsStateWithLifecycle()
+        val outbox by vm.link.outbox.collectAsStateWithLifecycle()
+        val currency = app.prefs.currencySymbol
+
+        val snackbar = remember { SnackbarHostState() }
+        val scope = rememberCoroutineScope()
+        var optionsFor by remember { mutableStateOf<MenuItem?>(null) }
+        var noteFor by remember { mutableStateOf<CartLine?>(null) }
+        var sending by remember { mutableStateOf(false) }
+
+        LaunchedEffect(Unit) {
+            vm.link.acks.collect { snackbar.showSnackbar("✓ Kitchen received ticket #${it.ticketNumber}") }
+        }
+        LaunchedEffect(Unit) {
+            vm.link.statusUpdates.collect {
+                if (it.status == TicketStatus.DONE) {
+                    app.chime()
+                    snackbar.showSnackbar(
+                        "🔔 Ticket #${it.ticketNumber} · ${it.origin} is READY",
+                        actionLabel = "OK",
+                        duration = SnackbarDuration.Long,
+                    )
+                }
+            }
+        }
+
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box(Modifier.safeDrawingPadding()) {
+                Column(Modifier.fillMaxSize()) {
+                    CashierTopBar(linkState, outbox.size, onSettings)
+                    BoxWithConstraints(Modifier.fillMaxSize()) {
+                        val cartCounts = cart.groupBy { it.item.id }.mapValues { e -> e.value.sumOf { it.quantity } }
+                        val onItemTap: (MenuItem) -> Unit = { item ->
+                            if (item.modifierGroups.isEmpty()) vm.add(item) else optionsFor = item
+                        }
+                        val tray = @Composable { m: Modifier ->
+                            TrayPane(
+                                cart = cart,
+                                currency = currency,
+                                onInc = { vm.changeQuantity(it, 1) },
+                                onDec = { vm.changeQuantity(it, -1) },
+                                onNote = { noteFor = it },
+                                onClear = vm::clear,
+                                onSend = { sending = true },
+                                modifier = m,
+                            )
+                        }
+                        val width = maxWidth
+                        if (width >= 700.dp) {
+                            Row(Modifier.fillMaxSize()) {
+                                MenuPane(menu, cartCounts, currency, onItemTap, Modifier.weight(1f).fillMaxHeight())
+                                tray(Modifier.width(if (width >= 1000.dp) 420.dp else 360.dp).fillMaxHeight())
+                            }
+                        } else {
+                            Column(Modifier.fillMaxSize()) {
+                                MenuPane(menu, cartCounts, currency, onItemTap, Modifier.weight(1.2f).fillMaxWidth())
+                                tray(Modifier.weight(1f).fillMaxWidth())
+                            }
+                        }
+                    }
+                }
+                SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(16.dp))
+            }
+        }
+
+        optionsFor?.let { item ->
+            ItemOptionsDialog(
+                item = item,
+                currency = currency,
+                onDismiss = { optionsFor = null },
+                onAdd = { mods, qty, notes ->
+                    vm.add(item, mods, qty, notes)
+                    optionsFor = null
+                },
+            )
+        }
+
+        noteFor?.let { line ->
+            NoteDialog(
+                title = "Note for ${line.item.name}",
+                initial = line.notes,
+                onDismiss = { noteFor = null },
+                onSave = {
+                    vm.setNotes(line.key, it)
+                    noteFor = null
+                },
+            )
+        }
+
+        if (sending) {
+            SendOrderDialog(
+                onDismiss = { sending = false },
+                onSend = { origin ->
+                    sending = false
+                    val online = linkState is LinkState.Connected
+                    vm.send(origin)
+                    if (!online) {
+                        scope.launch {
+                            snackbar.showSnackbar(
+                                "Kitchen not reachable — order saved and will be sent automatically",
+                                duration = SnackbarDuration.Long,
+                            )
+                        }
+                    }
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun CashierTopBar(state: LinkState, queued: Int, onSettings: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.primary, contentColor = Color.White) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("New Order", fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            val (dot, label) = when (state) {
+                is LinkState.Connected -> Color(0xFF69F0AE) to "Kitchen connected"
+                is LinkState.Connecting -> Color(0xFFFFD740) to "Connecting to kitchen…"
+                is LinkState.Searching -> Color(0xFFFFD740) to "Looking for kitchen…"
+                is LinkState.Offline -> Color(0xFFFF5252) to "Kitchen offline"
+            }
+            Surface(shape = RoundedCornerShape(50), color = Color.Black.copy(alpha = 0.2f)) {
+                Row(Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(10.dp).clip(CircleShape).background(dot))
+                    Spacer(Modifier.width(8.dp))
+                    Text(label)
+                    if (queued > 0) Text("  ·  $queued waiting to send", fontWeight = FontWeight.Bold)
+                }
+            }
+            IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, contentDescription = "Settings") }
+        }
+    }
+}
+
+@Composable
+private fun MenuPane(
+    menu: List<MenuItem>,
+    cartCounts: Map<String, Int>,
+    currency: String,
+    onTap: (MenuItem) -> Unit,
+    modifier: Modifier,
+) {
+    val categories = remember(menu) { listOf("All") + menu.map { it.category }.distinct() }
+    var selected by remember { mutableStateOf("All") }
+    if (selected !in categories) selected = "All"
+    val shown = if (selected == "All") menu else menu.filter { it.category == selected }
+
+    Column(modifier) {
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(categories) { c ->
+                FilterChip(
+                    selected = c == selected,
+                    onClick = { selected = c },
+                    label = { Text(c, fontSize = 18.sp, modifier = Modifier.padding(vertical = 8.dp)) },
+                )
+            }
+        }
+        if (menu.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text("No menu items yet. Add some in Settings → Menu.")
+            }
+        }
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(170.dp),
+            contentPadding = PaddingValues(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            items(shown, key = { it.id }) { item ->
+                ItemCard(item, cartCounts[item.id] ?: 0, currency) { onTap(item) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ItemCard(item: MenuItem, inCart: Int, currency: String, onClick: () -> Unit) {
+    Card(
+        onClick = onClick,
+        enabled = item.available,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        border = if (inCart > 0) BorderStroke(3.dp, MaterialTheme.colorScheme.primary) else null,
+    ) {
+        Box {
+            Column {
+                ItemImage(item, Modifier.fillMaxWidth().aspectRatio(4f / 3f))
+                Column(Modifier.padding(10.dp)) {
+                    Text(item.name, fontWeight = FontWeight.Bold, fontSize = 17.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    if (item.description.isNotBlank()) {
+                        Text(
+                            item.description, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                        )
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (item.available) money(item.price, currency) else "SOLD OUT",
+                        fontWeight = FontWeight.Bold, fontSize = 17.sp,
+                        color = if (item.available) MaterialTheme.colorScheme.primary else LateRed,
+                    )
+                }
+            }
+            if (inCart > 0) {
+                Box(
+                    Modifier.align(Alignment.TopEnd).padding(8.dp).size(36.dp).clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center,
+                ) { Text("$inCart", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp) }
+            }
+        }
+    }
+}
+
+@Composable
+fun ItemImage(item: MenuItem, modifier: Modifier) {
+    if (item.imagePath != null && File(item.imagePath).exists()) {
+        AsyncImage(
+            model = File(item.imagePath),
+            contentDescription = item.name,
+            contentScale = ContentScale.Crop,
+            modifier = modifier,
+        )
+    } else {
+        val hues = listOf(0xFFEF6C00, 0xFF6D4C41, 0xFF2E7D32, 0xFF00838F, 0xFF5E35B1, 0xFFAD1457, 0xFF455A64)
+        val color = Color(hues[Math.floorMod(item.name.hashCode(), hues.size)])
+        Box(modifier.background(color), contentAlignment = Alignment.Center) {
+            Text(
+                item.name.split(" ").filter { it.isNotBlank() }.take(2).joinToString("") { it.take(1).uppercase() },
+                color = Color.White, fontSize = 40.sp, fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrayPane(
+    cart: List<CartLine>,
+    currency: String,
+    onInc: (String) -> Unit,
+    onDec: (String) -> Unit,
+    onNote: (CartLine) -> Unit,
+    onClear: () -> Unit,
+    onSend: () -> Unit,
+    modifier: Modifier,
+) {
+    Surface(modifier, color = MaterialTheme.colorScheme.surfaceVariant) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Order tray (${cart.sumOf { it.quantity }})",
+                    fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f),
+                )
+                if (cart.isNotEmpty()) TextButton(onClick = onClear) { Text("Clear") }
+            }
+            if (cart.isEmpty()) {
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Text(
+                        "Tap a menu item to add it",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    )
+                }
+            } else {
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    items(cart, key = { it.key }) { line ->
+                        CartLineRow(line, currency, { onInc(line.key) }, { onDec(line.key) }, { onNote(line) })
+                    }
+                }
+            }
+            HorizontalDivider(Modifier.padding(vertical = 8.dp))
+            Row {
+                Text("Total", fontSize = 20.sp, modifier = Modifier.weight(1f))
+                Text(money(cart.sumOf { it.total }, currency), fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onSend,
+                enabled = cart.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = SendGreen, contentColor = Color.White),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.fillMaxWidth().height(76.dp),
+            ) { Text("SEND TO KITCHEN  ➜", fontSize = 22.sp, fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+@Composable
+private fun CartLineRow(line: CartLine, currency: String, onInc: () -> Unit, onDec: () -> Unit, onNote: () -> Unit) {
+    Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surface) {
+        Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f).clickable(onClick = onNote)) {
+                Text(line.item.name, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                if (line.modifiers.isNotEmpty()) {
+                    Text(line.modifiers.joinToString(", ") { it.name }, fontSize = 13.sp, color = MaterialTheme.colorScheme.secondary)
+                }
+                if (line.notes.isNotBlank()) {
+                    Text("“${line.notes}”", fontSize = 13.sp, fontStyle = FontStyle.Italic, color = LateRed)
+                } else {
+                    Text("+ add note", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                }
+                Text(money(line.total, currency), fontSize = 13.sp)
+            }
+            StepperButton("−", onDec)
+            Text("${line.quantity}", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(36.dp), textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            StepperButton("+", onInc)
+        }
+    }
+}
+
+@Composable
+fun StepperButton(label: String, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        contentPadding = PaddingValues(0.dp),
+        shape = CircleShape,
+        modifier = Modifier.size(44.dp),
+    ) { Text(label, fontSize = 22.sp, fontWeight = FontWeight.Bold) }
+}
+
+@Composable
+private fun ItemOptionsDialog(
+    item: MenuItem,
+    currency: String,
+    onDismiss: () -> Unit,
+    onAdd: (List<ModifierOption>, Int, String) -> Unit,
+) {
+    // group index -> chosen option indexes
+    val chosen = remember { mutableStateMapOf<Int, Set<Int>>() }
+    var qty by remember { mutableIntStateOf(1) }
+    var notes by remember { mutableStateOf("") }
+
+    val selectedOptions = item.modifierGroups.flatMapIndexed { gi, g ->
+        (chosen[gi] ?: emptySet()).sorted().map { g.options[it] }
+    }
+    val missing = item.modifierGroups.withIndex().any { (gi, g) -> g.required && chosen[gi].isNullOrEmpty() }
+    val total = (item.price + selectedOptions.sumOf { it.price }) * qty
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(item.name, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                item.modifierGroups.forEachIndexed { gi, group ->
+                    Text(
+                        group.name + when {
+                            group.required -> "  (required)"
+                            group.multiSelect -> "  (choose any)"
+                            else -> "  (optional)"
+                        },
+                        fontWeight = FontWeight.Bold, fontSize = 17.sp,
+                        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
+                    )
+                    group.options.forEachIndexed { oi, opt ->
+                        val isOn = chosen[gi]?.contains(oi) == true
+                        val toggle = {
+                            val cur = chosen[gi] ?: emptySet()
+                            chosen[gi] = when {
+                                group.multiSelect -> if (isOn) cur - oi else cur + oi
+                                isOn && !group.required -> emptySet()
+                                else -> setOf(oi)
+                            }
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().clickable { toggle() }.padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (group.multiSelect) Checkbox(isOn, { toggle() }) else RadioButton(isOn, { toggle() })
+                            Text(opt.name, fontSize = 17.sp, modifier = Modifier.weight(1f))
+                            if (opt.price > 0) Text("+" + money(opt.price, currency))
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = notes,
+                    onValueChange = { notes = it },
+                    label = { Text("Special instructions (optional)") },
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                )
+                Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Quantity", fontSize = 17.sp, modifier = Modifier.weight(1f))
+                    StepperButton("−") { if (qty > 1) qty-- }
+                    Text("$qty", fontSize = 20.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 16.dp))
+                    StepperButton("+") { qty++ }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onAdd(selectedOptions, qty, notes) }, enabled = !missing) {
+                Text(if (missing) "Choose required options" else "Add to tray · ${money(total, currency)}")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@Composable
+fun NoteDialog(title: String, initial: String, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var text by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = text, onValueChange = { text = it },
+                placeholder = { Text("e.g. No onions, sauce on the side") },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = { Button(onClick = { onSave(text) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun SendOrderDialog(onDismiss: () -> Unit, onSend: (String) -> Unit) {
+    val prefs = App.instance.prefs
+    var byTable by remember { mutableStateOf(true) }
+    var table by remember { mutableStateOf("") }
+    var name by remember { mutableStateOf("") }
+    var staff by remember { mutableStateOf(prefs.staffName) }
+
+    val origin = if (byTable) table.trim().takeIf { it.isNotEmpty() }?.let { "Table $it" } else name.trim().ifEmpty { null }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Who is this order for?", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    SegmentedButton(byTable, { byTable = true }, SegmentedButtonDefaults.itemShape(0, 2)) { Text("Table number") }
+                    SegmentedButton(!byTable, { byTable = false }, SegmentedButtonDefaults.itemShape(1, 2)) { Text("Customer name") }
+                }
+                Spacer(Modifier.height(12.dp))
+                if (byTable) {
+                    OutlinedTextField(
+                        value = table, onValueChange = { table = it.take(6) },
+                        label = { Text("Table") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        (1..20).forEach { n ->
+                            val on = table == "$n"
+                            Button(
+                                onClick = { table = "$n" },
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier.size(52.dp),
+                                shape = RoundedCornerShape(10.dp),
+                                colors = if (on) ButtonDefaults.buttonColors()
+                                else ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.onSurface,
+                                ),
+                            ) { Text("$n", fontSize = 18.sp) }
+                        }
+                    }
+                } else {
+                    OutlinedTextField(
+                        value = name, onValueChange = { name = it },
+                        label = { Text("Customer name") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = staff, onValueChange = { staff = it },
+                    label = { Text("Taken by (cashier)") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    prefs.staffName = staff
+                    origin?.let(onSend)
+                },
+                enabled = origin != null,
+                colors = ButtonDefaults.buttonColors(containerColor = SendGreen),
+                modifier = Modifier.height(56.dp),
+            ) { Text("SEND TO KITCHEN", fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Back") } },
+    )
+}

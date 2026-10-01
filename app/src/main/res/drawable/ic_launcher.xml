@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Simple launcher icon: an orange circle with a white plate and cloche. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#D84315"
+        android:pathData="M54,4a50,50 0,1 1,0 100a50,50 0,1 1,0 -100z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,70h60v6h-60z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M28,66a26,26 0,0 1,52 0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M51,34h6v6h-6z" />
+</vector>
